@@ -17,6 +17,12 @@
 
 using namespace std;
 
+#define END_CHECK if(start==end){request.hasError=TRUE;request.errorNear.start=start;request.errorNear.end=start;return;}
+#define MOVE_THROUGH_WHITESPACE while(((*start==' ')||(*start=='\0')||(*start=='\r')||(*start=='\n'))&&start<end)start++;END_CHECK;
+#define MOVE_TO_WHITESPACE while((*start!=' ')&&(*start!='\0')&&(*start!='\r')&&(*start!='\n')&&start<end)start++;END_CHECK;
+#define MOVE_THROUGH_EOL while(((*start=='\0')||(*start=='\r')||(*start=='\n'))&&start<end)start++;END_CHECK;
+#define MOVE_TO_EOL while((*start!='\0')&&(*start!='\r')&&(*start!='\n')&&start<end)start++;END_CHECK;
+
 #define NUM_HANDLER_THREADS 4
 #define NUM_CONCURRENT_CONNECTIONS 100
 #define CONTEXT_BUFFER_SIZE 1024
@@ -29,6 +35,37 @@ using namespace std;
 #define CONTEXT_STATE_PENDING_RECV 0x03
 #define CONTEXT_STATE_PENDING_XMITFILE 0x04
 
+// end points to 1 past the end
+// end minus start gives length
+struct CHAR_SPAN
+{
+	char* start;
+	char* end;
+	uint32_t length()
+	{
+		if (start > end) throw new std::exception("start past end");
+		return (uint32_t)(end - start);
+	}
+};
+
+struct HTTP_HEADER
+{
+	CHAR_SPAN name;
+	CHAR_SPAN value;
+};
+
+struct HTTP_REQUEST
+{
+	CHAR_SPAN verb;
+	CHAR_SPAN resource;
+	CHAR_SPAN version;
+	CHAR_SPAN* lpHeaders = nullptr;
+	uint32_t num_headers;
+	uint32_t cap_headers;
+	BOOL hasError;
+	CHAR_SPAN errorNear;
+};
+
 struct CONNECTION_CONTEXT
 {
 	OVERLAPPED overlapped = {}; // must be first
@@ -40,6 +77,7 @@ struct CONNECTION_CONTEXT
 	HANDLE hFile = INVALID_HANDLE_VALUE;
 	char head_cbuffer[CONTEXT_BUFFER_SIZE];
 	TRANSMIT_FILE_BUFFERS tfb = {};
+	HTTP_REQUEST request;
 };
 
 struct SERVER_CONTEXT
@@ -52,6 +90,114 @@ struct SERVER_CONTEXT
 };
 
 const char* FORMAT_HTTP_RESPONSE_HEAD = "HTTP/1.1 200 OK\r\nServer: YORE\r\nContent-Length: %i\r\nContent-Type: text/html\r\n\r\n";
+
+BOOL starts_with(CHAR_SPAN& span, const char* comp, const uint32_t len)
+{
+	uint32_t min_chars_in_common = span.length() < len ? span.length() : len;
+	if (min_chars_in_common > 0)
+	{
+		for (uint32_t c = 0; c < min_chars_in_common; c++)
+		{
+			if (span.start[c] != comp[c]) return FALSE;
+		}
+		return TRUE;
+	}
+	return FALSE;
+}
+
+BOOL starts_with(char* start, char* end, const char* comp, const uint32_t len)
+{
+	uint32_t span_length = (uint32_t)(end - start);
+	uint32_t min_chars_in_common = span_length < len ? span_length : len;
+	if (min_chars_in_common > 0)
+	{
+		for (uint32_t c = 0; c < min_chars_in_common; c++)
+		{
+			if (start[c] != comp[c]) return FALSE;
+		}
+		return TRUE;
+	}
+	return FALSE;
+}
+
+const char* VERB_GET = "GET";
+const char* END_OF_REQ = "\r\n\r\n";
+
+void parse_http(char* start, char* end, HTTP_REQUEST& request)
+{
+	request.hasError = FALSE;
+
+	CHAR_SPAN input = { start, end };
+	if (!starts_with(input, VERB_GET, 3))
+	{
+		// parse error
+		request.hasError = TRUE;
+		request.errorNear.start = start;
+		request.errorNear.end = start + ((end - start) < 5 ? (end - start) : 5);
+		return;
+	}
+	request.verb.start = start;
+
+	while (*start != ' ' && start < end) start++;
+	END_CHECK;
+	request.verb.end = start;
+	*start = '\0';
+
+	MOVE_THROUGH_WHITESPACE;
+	request.resource.start = start;
+
+	MOVE_TO_WHITESPACE;
+	request.resource.end = start;
+	*start = '\0';
+
+	MOVE_THROUGH_WHITESPACE;
+	request.version.start = start;
+
+	MOVE_TO_EOL;
+	if (starts_with(start, end, END_OF_REQ, 4))
+	{
+		// end of request
+		// no headers
+		request.version.end = start;
+		*start = '\0';
+		return;
+	}
+	else
+	{
+		request.version.end = start;
+		*start = '\0';
+	}
+
+	request.lpHeaders = (CHAR_SPAN*)malloc(16 * sizeof(CHAR_SPAN));
+	memset(request.lpHeaders, 0, 16 * sizeof(CHAR_SPAN));
+	request.num_headers = 0;
+	request.cap_headers = 16;
+
+	while (true)
+	{
+		MOVE_THROUGH_EOL;
+		request.lpHeaders[request.num_headers].start = start;
+		MOVE_TO_EOL;
+		if (starts_with(start, end, END_OF_REQ, 4))
+		{
+			// end of request
+			// no headers
+			request.lpHeaders[request.num_headers].end = start;
+			*start = '\0';
+			request.num_headers++;
+			return;
+		}
+		else
+		{
+			request.lpHeaders[request.num_headers].end = start;
+			*start = '\0';
+		}
+		request.num_headers++;
+		if (request.num_headers == 16) break;
+	}
+
+	return;
+}
 
 void init_connections(SERVER_CONTEXT* svr)
 {
@@ -233,6 +379,35 @@ DWORD WINAPI handler_proc(void* parm1)
 				case CONTEXT_STATE_PENDING_ACCEPT:
 					BOOST_LOG_TRIVIAL(info) << "==> CONNECTION ACCEPTED <==, entering recv...";
 					BOOST_LOG_TRIVIAL(info) << nbxfer << " bytes transferred";
+
+					// parse it
+					parse_http(connection->cbuffer,
+						connection->cbuffer + (nbxfer < CONTEXT_BUFFER_SIZE ? nbxfer : CONTEXT_BUFFER_SIZE),
+						connection->request);
+					if (connection->request.hasError)
+					{
+						BOOST_LOG_TRIVIAL(error) << "PARSE ERROR NEAR";
+						for (char* c = connection->request.errorNear.start; c < connection->request.errorNear.end; c++)
+						{
+							BOOST_LOG_TRIVIAL(error) << *c;
+						}
+					}
+					else
+					{
+						BOOST_LOG_TRIVIAL(info) << "VERB = " << connection->request.verb.start;
+						BOOST_LOG_TRIVIAL(info) << "RESOURCE = " << connection->request.resource.start;
+						BOOST_LOG_TRIVIAL(info) << "HTTP VERSION = " << connection->request.version.start;
+						for (unsigned int h = 0; h < connection->request.num_headers; h++)
+						{
+							BOOST_LOG_TRIVIAL(info) << "HEADER = " << connection->request.lpHeaders[h].start;
+						}
+					}
+					if (connection->request.lpHeaders)
+					{
+						free(connection->request.lpHeaders);
+						connection->request.lpHeaders = nullptr;
+					}
+
 					// connection was accepted, now - read
 					/*
 					free_cnn->wsabuf.buf = reinterpret_cast<CHAR*>(free_cnn->buffer);
