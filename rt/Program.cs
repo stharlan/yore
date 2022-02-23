@@ -25,6 +25,7 @@ foreach(int sl in sendLength)
     Console.WriteLine($"send length = {sl}");
     for (int i = 0; i < loops; i++)
     {
+        Console.WriteLine("Sending random bytes");
         var rand = new Random();
         byte[] r = new byte[sl];
         rand.NextBytes(r);

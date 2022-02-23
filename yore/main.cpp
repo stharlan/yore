@@ -18,27 +18,11 @@
 #include <span>
 #include <boost/log/trivial.hpp>
 
+#include "yore_common.h"
+
 using namespace std;
 
-#define END_CHECK if(start==end){request.hasError=TRUE;request.errorNear=std::span<char>(start,start);return;}
-#define MOVE_THROUGH_WHITESPACE while(((*start==' ')||(*start=='\r')||(*start=='\n'))&&(start<end))start++;END_CHECK;
-#define MOVE_TO_WHITESPACE while((*start!=' ')&&(*start!='\r')&&(*start!='\n')&&(start<end))start++;END_CHECK;
-#define MOVE_THROUGH_EOL while(((*start=='\r')||(*start=='\n'))&&(start<end))start++;END_CHECK;
-#define MOVE_TO_EOL while((*start!='\r')&&(*start!='\n')&&(start<end))start++;END_CHECK;
-
-#define NUM_HANDLER_THREADS 4
-#define NUM_CONCURRENT_CONNECTIONS 100
-#define CONTEXT_INPUT_BUFFER_SIZE 8196
-#define CONTEXT_OUTPUT_BUFFER_SIZE 1024
-#define YORE_ROOT L"C:\\yore_root\\"
-
-#define CONN_CTX_LOCKED_BIT 0x01
-
-#define CONTEXT_STATE_NULL 0x00
-#define CONTEXT_STATE_INIT 0x01
-#define CONTEXT_STATE_PENDING_ACCEPT 0x02
-#define CONTEXT_STATE_PENDING_RECV 0x03
-#define CONTEXT_STATE_PENDING_XMITFILE 0x04
+const char* FORMAT_HTTP_RESPONSE_HEAD = "HTTP/1.1 200 OK\r\nServer: YORE\r\nContent-Length: %i\r\nContent-Type: text/html\r\n\r\n";
 
 namespace std {
 	inline boost::log::formatting_ostream& operator<<(boost::log::formatting_ostream& os, std::span<char>& dt)
@@ -51,143 +35,6 @@ namespace std {
 		for (const auto c : dt) os << c;
 		return os;
 	}
-}
-
-struct HTTP_REQUEST
-{
-	std::span<char> verb;
-	std::span<char> resource;
-	std::span<char> version;
-	std::vector<std::span<char>> headers;
-	BOOL hasError;
-	std::span<char> errorNear;
-};
-
-struct CONNECTION_CONTEXT
-{
-	OVERLAPPED overlapped = {};					// must be first in struct
-	uint32_t flags = 0;
-	uint32_t state = CONTEXT_STATE_NULL;
-	SOCKET acceptSocket = INVALID_SOCKET;
-	char cbuffer[CONTEXT_INPUT_BUFFER_SIZE];			// input buffer
-	WSABUF wsabuf;
-	HANDLE hFile = INVALID_HANDLE_VALUE;
-	char head_cbuffer[CONTEXT_OUTPUT_BUFFER_SIZE];		// http output header
-	TRANSMIT_FILE_BUFFERS tfb = {};				// for transmit file
-	HTTP_REQUEST request;						// for parsing request
-	wchar_t path_of_file_to_return[MAX_PATH];
-};
-
-struct SERVER_CONTEXT
-{
-	SOCKET listenSocket = INVALID_SOCKET;
-	LPFN_ACCEPTEX lpfnAcceptEx = nullptr;
-	HANDLE hIocp = nullptr;
-	CONNECTION_CONTEXT* connections = nullptr;
-	SRWLOCK cnn_sync = {};
-};
-
-const char* FORMAT_HTTP_RESPONSE_HEAD = "HTTP/1.1 200 OK\r\nServer: YORE\r\nContent-Length: %i\r\nContent-Type: text/html\r\n\r\n";
-
-BOOL starts_with(std::span<char>& cspan, const char* comp, const uint32_t len)
-{
-	size_t min_chars_in_common = cspan.size() < len ? cspan.size() : len;
-	if (min_chars_in_common > 0)
-	{
-		for (uint32_t c = 0; c < min_chars_in_common; c++)
-		{
-			if (cspan[c] != comp[c]) return FALSE;
-		}
-		return TRUE;
-	}
-	return FALSE;
-}
-
-BOOL starts_with(char* start, char* end, const char* comp, const uint32_t len)
-{
-	uint32_t span_length = (uint32_t)(end - start);
-	uint32_t min_chars_in_common = span_length < len ? span_length : len;
-	if (min_chars_in_common > 0)
-	{
-		for (uint32_t c = 0; c < min_chars_in_common; c++)
-		{
-			if (start[c] != comp[c]) return FALSE;
-		}
-		return TRUE;
-	}
-	return FALSE;
-}
-
-const char* VERB_GET = "GET";
-const char* END_OF_REQ = "\r\n\r\n";
-
-void parse_http(char* start, char* end, HTTP_REQUEST& request)
-{
-
-	request.verb = std::span<char>();
-	request.resource = std::span<char>();
-	request.version = std::span<char>();
-	request.hasError = FALSE;
-	request.errorNear = std::span<char>();
-	request.headers = std::vector<std::span<char>>();
-
-	char* istart = nullptr;
-
-	std::span<char> input = { start, end };
-	if (!starts_with(input, VERB_GET, 3))
-	{
-		// parse error
-		request.hasError = TRUE;
-		request.errorNear = std::span<char>(start, start + ((end - start) < 5 ? (end - start) : 5));
-		return;
-	}
-	istart = start;
-
-	while (*start != ' ' && start < end) start++;
-	END_CHECK;
-	request.verb = std::span<char>(istart, start);
-
-	MOVE_THROUGH_WHITESPACE;
-	istart = start;
-
-	MOVE_TO_WHITESPACE;
-	request.resource = std::span<char>(istart, start);
-
-	MOVE_THROUGH_WHITESPACE;
-	istart = start;
-
-	MOVE_TO_EOL;
-	if (starts_with(start, end, END_OF_REQ, 4))
-	{
-		// end of request
-		// no headers
-		request.version = std::span<char>(istart, start);
-		return;
-	}
-	else
-	{
-		request.version = std::span<char>(istart, start);
-	}
-
-	while (true)
-	{
-		MOVE_THROUGH_EOL;
-		istart = start;
-		MOVE_TO_EOL;
-		if (starts_with(start, end, END_OF_REQ, 4))
-		{
-			// end of request
-			// no headers
-			request.headers.push_back(std::span<char>(istart, start));
-			return;
-		}
-		else
-		{
-			request.headers.push_back(std::span<char>(istart, start));
-		}
-	}
-
-	return;
 }
 
 void init_connections(SERVER_CONTEXT* svr)
@@ -223,35 +70,7 @@ void cleanup_connections(SERVER_CONTEXT* server)
 	}
 }
 
-CONNECTION_CONTEXT* get_free_connection(SERVER_CONTEXT* svr)
-{
-	CONNECTION_CONTEXT* result = nullptr;
-
-	AcquireSRWLockExclusive(&svr->cnn_sync);
-
-	for (int i = 0; i < NUM_CONCURRENT_CONNECTIONS; i++)
-	{
-		CONNECTION_CONTEXT* ctx = (CONNECTION_CONTEXT*)(svr->connections + i);
-		if (ctx != nullptr)
-		{
-			// set the first bit
-			if (~(ctx->flags & CONN_CTX_LOCKED_BIT))
-			{
-				ctx->flags |= CONN_CTX_LOCKED_BIT;
-				result = svr->connections + i;
-				BOOST_LOG_TRIVIAL(info) << "Using connection 0x" << hex << svr->connections + i << dec;
-				goto found_cnn;
-			}
-		}
-	}
-
-found_cnn:
-	ReleaseSRWLockExclusive(&svr->cnn_sync);
-
-	return result;
-}
-
-void handler_init_socket(DWORD threadId, CONNECTION_CONTEXT* connection, SERVER_CONTEXT* server)
+void handler_init_socket(CONNECTION_CONTEXT* connection, SERVER_CONTEXT* server)
 {
 	// new socket
 	connection->acceptSocket = WSASocket(AF_INET, SOCK_STREAM, IPPROTO_TCP, nullptr, 0, WSA_FLAG_OVERLAPPED);
@@ -268,7 +87,6 @@ void handler_init_socket(DWORD threadId, CONNECTION_CONTEXT* connection, SERVER_
 			// error, free it up
 			closesocket(connection->acceptSocket);
 			connection->acceptSocket = INVALID_SOCKET;
-			connection->flags = 0x00;
 		}
 		else
 		{
@@ -284,7 +102,6 @@ void handler_init_socket(DWORD threadId, CONNECTION_CONTEXT* connection, SERVER_
 					BOOST_LOG_TRIVIAL(info) << "failed to acceptex " << code;
 					closesocket(connection->acceptSocket);
 					connection->acceptSocket = INVALID_SOCKET;
-					connection->flags = 0x00;
 				}
 				else
 				{
@@ -296,16 +113,136 @@ void handler_init_socket(DWORD threadId, CONNECTION_CONTEXT* connection, SERVER_
 				BOOST_LOG_TRIVIAL(error) << "ERROR: Failed to acceptex";
 				closesocket(connection->acceptSocket);
 				connection->acceptSocket = INVALID_SOCKET;
-				connection->flags = 0x00;
 			}
 		}
 	}
+}
+
+void on_pending_xmit_file(DWORD nbxfer, CONNECTION_CONTEXT* connection, SERVER_CONTEXT* server)
+{
+	BOOST_LOG_TRIVIAL(info) << "file transmitted...";
+	BOOST_LOG_TRIVIAL(info) << nbxfer << " bytes transferred";
+	CloseHandle(connection->hFile);
+	connection->hFile = INVALID_HANDLE_VALUE;
+	closesocket(connection->acceptSocket);
+	connection->acceptSocket = INVALID_SOCKET;
+	//free_cnn->flags = 0;
+	BOOST_LOG_TRIVIAL(info) << "putting socket back into wait for accept mode";
+	handler_init_socket(connection, server);
+}
+
+void on_pending_accept(DWORD nbxfer, CONNECTION_CONTEXT* connection, SERVER_CONTEXT* server)
+{
+	BOOL parse_is_valid = false;
+
+	BOOST_LOG_TRIVIAL(info) << "==> CONNECTION ACCEPTED <==, entering recv...";
+	BOOST_LOG_TRIVIAL(info) << nbxfer << " bytes transferred";
+
+	// parse it
+	parse_is_valid = false;
+	parse_http(connection->cbuffer,
+		connection->cbuffer + (nbxfer < CONTEXT_INPUT_BUFFER_SIZE ? nbxfer : CONTEXT_INPUT_BUFFER_SIZE),
+		connection->request);
+	if (connection->request.hasError)
+	{
+		BOOST_LOG_TRIVIAL(error) << "PARSE ERROR NEAR: " << connection->request.errorNear;
+		// what now
+		// close the socket
+		closesocket(connection->acceptSocket);
+		connection->acceptSocket = INVALID_SOCKET;
+		//free_cnn->flags = 0;
+		BOOST_LOG_TRIVIAL(info) << "putting socket back into wait for accept mode";
+		handler_init_socket(connection, server);
+	}
 	else
 	{
-		// error, free it up
-		connection->flags = 0x00;
+		BOOST_LOG_TRIVIAL(info) << "VERB = " << connection->request.verb;
+		BOOST_LOG_TRIVIAL(info) << "RESOURCE = " << connection->request.resource;
+		BOOST_LOG_TRIVIAL(info) << "HTTP VERSION = " << connection->request.version;
+		for (const auto& h : connection->request.headers)
+		{
+			BOOST_LOG_TRIVIAL(info) << "HEADER = " << h;
+		}
+		parse_is_valid = true;
 	}
 
+	// connection was accepted, now - read
+	/*
+	free_cnn->wsabuf.buf = reinterpret_cast<CHAR*>(free_cnn->buffer);
+	free_cnn->wsabuf.len = CONTEXT_BUFFER_SIZE;
+	if (SOCKET_ERROR == WSARecv(free_cnn->acceptSocket, &free_cnn->wsabuf, 1, nullptr, &flags,
+		reinterpret_cast<LPOVERLAPPED>(free_cnn), nullptr))
+	{
+		if (WSAGetLastError() != WSA_IO_PENDING)
+		{
+			BOOST_LOG_TRIVIAL(error) << "ERROR: Failed to recv";
+		}
+	}
+	free_cnn->state = CONTEXT_STATE_PENDING_RECV;
+	*/
+
+	if (TRUE == parse_is_valid)
+	{
+
+		// convert any fslsh to bkslsh in resource
+		for (auto iter = connection->request.resource.begin();
+			iter != connection->request.resource.end();
+			++iter)
+		{
+			if (*iter == '/') *iter = '\\';
+		}
+
+		// clear path var
+		memset(connection->path_of_file_to_return, 0, MAX_PATH * sizeof(wchar_t));
+
+		// convert resource to wcs in path
+		size_t numOfCharConverted = 0;
+		mbstowcs_s(&numOfCharConverted, connection->path_of_file_to_return, MAX_PATH,
+			connection->request.resource.data(), connection->request.resource.size_bytes());
+
+		if (connection->path_of_file_to_return[numOfCharConverted - 2] == '\\')
+		{
+			wcscat_s(connection->path_of_file_to_return, MAX_PATH, L"index.html");
+		}
+
+		wchar_t* first_char = connection->path_of_file_to_return;
+		while (*first_char == L'\\') first_char++;
+
+		PathCchCombine(connection->path_of_file_to_return, MAX_PATH,
+			YORE_ROOT, first_char);
+
+		connection->hFile = CreateFile(connection->path_of_file_to_return, GENERIC_READ, FILE_SHARE_READ, nullptr,
+			OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+		if (connection->hFile != INVALID_HANDLE_VALUE)
+		{
+			DWORD fileSize = GetFileSize(connection->hFile, nullptr);
+			memset(connection->head_cbuffer, 0, CONTEXT_OUTPUT_BUFFER_SIZE);
+			connection->tfb.HeadLength = sprintf_s(connection->head_cbuffer, CONTEXT_OUTPUT_BUFFER_SIZE, FORMAT_HTTP_RESPONSE_HEAD, fileSize);
+			connection->tfb.Head = connection->head_cbuffer;
+			if (FALSE == TransmitFile(connection->acceptSocket, connection->hFile, fileSize, 0 /* default */,
+				&connection->overlapped, &connection->tfb, TF_DISCONNECT))
+			{
+				if (WSAGetLastError() != ERROR_IO_PENDING)
+				{
+					BOOST_LOG_TRIVIAL(error) << "ERROR: Failed to transmit file";
+					closesocket(connection->acceptSocket);
+					connection->acceptSocket = INVALID_SOCKET;
+				}
+				else
+				{
+					connection->state = CONTEXT_STATE_PENDING_XMITFILE;
+				}
+			}
+			else
+			{
+				BOOST_LOG_TRIVIAL(info) << "sync transmit?";
+			}
+		}
+		else
+		{
+			BOOST_LOG_TRIVIAL(info) << "can't find input file";
+		}
+	}
 }
 
 DWORD WINAPI handler_proc(void* parm1)
@@ -316,7 +253,6 @@ DWORD WINAPI handler_proc(void* parm1)
 	LPOVERLAPPED lpovlp = nullptr;
 	DWORD threadId = GetCurrentThreadId();
 	BOOL done = FALSE;
-	BOOL parse_is_valid = false;
 
 	while (!done)
 	{
@@ -363,132 +299,13 @@ DWORD WINAPI handler_proc(void* parm1)
 				switch (connection->state)
 				{
 				case CONTEXT_STATE_PENDING_XMITFILE:
-					BOOST_LOG_TRIVIAL(info) << "file transmitted...";
-					BOOST_LOG_TRIVIAL(info) << nbxfer << " bytes transferred";
-					CloseHandle(connection->hFile);
-					connection->hFile = INVALID_HANDLE_VALUE;
-					closesocket(connection->acceptSocket);
-					connection->acceptSocket = INVALID_SOCKET;
-					//free_cnn->flags = 0;
-					BOOST_LOG_TRIVIAL(info) << "putting socket back into wait for accept mode";
-					handler_init_socket(threadId, connection, server);
+					on_pending_xmit_file(nbxfer, connection, server);
 					break;
 				case CONTEXT_STATE_PENDING_ACCEPT:
-					BOOST_LOG_TRIVIAL(info) << "==> CONNECTION ACCEPTED <==, entering recv...";
-					BOOST_LOG_TRIVIAL(info) << nbxfer << " bytes transferred";
-
-					// parse it
-					parse_is_valid = false;
-					parse_http(connection->cbuffer,
-						connection->cbuffer + (nbxfer < CONTEXT_INPUT_BUFFER_SIZE ? nbxfer : CONTEXT_INPUT_BUFFER_SIZE),
-						connection->request);
-					if (connection->request.hasError)
-					{
-						BOOST_LOG_TRIVIAL(error) << "PARSE ERROR NEAR: " << connection->request.errorNear;
-						// what now
-						// close the socket
-						closesocket(connection->acceptSocket);
-						connection->acceptSocket = INVALID_SOCKET;
-						//free_cnn->flags = 0;
-						BOOST_LOG_TRIVIAL(info) << "putting socket back into wait for accept mode";
-						handler_init_socket(threadId, connection, server);
-					}
-					else
-					{
-						BOOST_LOG_TRIVIAL(info) << "VERB = " << connection->request.verb;
-						BOOST_LOG_TRIVIAL(info) << "RESOURCE = " << connection->request.resource;
-						BOOST_LOG_TRIVIAL(info) << "HTTP VERSION = " << connection->request.version;
-						for (const auto& h : connection->request.headers)
-						{
-							BOOST_LOG_TRIVIAL(info) << "HEADER = " << h;
-						}
-						parse_is_valid = true;
-					}
-
-					// connection was accepted, now - read
-					/*
-					free_cnn->wsabuf.buf = reinterpret_cast<CHAR*>(free_cnn->buffer);
-					free_cnn->wsabuf.len = CONTEXT_BUFFER_SIZE;
-					if (SOCKET_ERROR == WSARecv(free_cnn->acceptSocket, &free_cnn->wsabuf, 1, nullptr, &flags,
-						reinterpret_cast<LPOVERLAPPED>(free_cnn), nullptr))
-					{
-						if (WSAGetLastError() != WSA_IO_PENDING)
-						{
-							BOOST_LOG_TRIVIAL(error) << "ERROR: Failed to recv";
-						}
-					}
-					free_cnn->state = CONTEXT_STATE_PENDING_RECV;
-					*/
-
-					if (TRUE == parse_is_valid)
-					{
-
-						// convert any fslsh to bkslsh in resource
-						for (auto iter = connection->request.resource.begin();
-							iter != connection->request.resource.end();
-							++iter)
-						{
-							if (*iter == '/') *iter = '\\';
-						}
-
-						// clear path var
-						memset(connection->path_of_file_to_return, 0, MAX_PATH * sizeof(wchar_t));
-
-						// convert resource to wcs in path
-						size_t numOfCharConverted = 0;
-						mbstowcs_s(&numOfCharConverted, connection->path_of_file_to_return, MAX_PATH,
-							connection->request.resource.data(), connection->request.resource.size_bytes());
-
-						if (connection->path_of_file_to_return[numOfCharConverted - 2] == '\\')
-						{
-							wcscat_s(connection->path_of_file_to_return, MAX_PATH, L"index.html");
-						}
-
-						wchar_t* first_char = connection->path_of_file_to_return;
-						while (*first_char == L'\\') first_char++;
-
-						PathCchCombine(connection->path_of_file_to_return, MAX_PATH,
-							YORE_ROOT, first_char);
-
-						connection->hFile = CreateFile(connection->path_of_file_to_return, GENERIC_READ, FILE_SHARE_READ, nullptr,
-							OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-						if (connection->hFile != INVALID_HANDLE_VALUE)
-						{
-							DWORD fileSize = GetFileSize(connection->hFile, nullptr);
-							memset(connection->head_cbuffer, 0, CONTEXT_OUTPUT_BUFFER_SIZE);
-							connection->tfb.HeadLength = sprintf_s(connection->head_cbuffer, CONTEXT_OUTPUT_BUFFER_SIZE, FORMAT_HTTP_RESPONSE_HEAD, fileSize);
-							connection->tfb.Head = connection->head_cbuffer;
-							if (FALSE == TransmitFile(connection->acceptSocket, connection->hFile, fileSize, 0 /* default */,
-								&connection->overlapped, &connection->tfb, TF_DISCONNECT))
-							{
-								if (WSAGetLastError() != ERROR_IO_PENDING)
-								{
-									BOOST_LOG_TRIVIAL(error) << "ERROR: Failed to transmit file";
-									closesocket(connection->acceptSocket);
-									connection->acceptSocket = INVALID_SOCKET;
-									connection->flags = 0;
-								}
-								else
-								{
-									connection->state = CONTEXT_STATE_PENDING_XMITFILE;
-								}
-							}
-							else
-							{
-								BOOST_LOG_TRIVIAL(info) << "sync transmit?";
-							}
-						}
-						else
-						{
-							BOOST_LOG_TRIVIAL(info) << "can't find input file";
-						}
-					}
+					on_pending_accept(nbxfer, connection, server);
 					break;
 				case CONTEXT_STATE_INIT:
-
-					// got a packet
-					//BOOST_LOG_TRIVIAL(info) << "need to create new accept socket for connection " << hex << connection <<  dec << "...";
-					handler_init_socket(threadId, connection, server);
+					handler_init_socket(connection, server);
 					break;
 				}
 			}
