@@ -22,7 +22,8 @@
 
 using namespace std;
 
-const char* FORMAT_HTTP_RESPONSE_HEAD = "HTTP/1.1 200 OK\r\nServer: YORE\r\nContent-Length: %i\r\nContent-Type: text/html\r\n\r\n";
+const char* FORMAT_HTTP_RESPONSE_200 = "HTTP/1.1 200 OK\r\nServer: YORE\r\nContent-Length: %i\r\nContent-Type: text/html\r\n\r\n";
+const char* FORMAT_HTTP_RESPONSE_404 = "HTTP/1.1 404 Not Found\r\nServer: YORE\r\nContent-Length: 0\r\n\r\n";
 
 namespace std {
 	inline boost::log::formatting_ostream& operator<<(boost::log::formatting_ostream& os, std::span<char>& dt)
@@ -131,6 +132,31 @@ void on_pending_xmit_file(DWORD nbxfer, CONNECTION_CONTEXT* connection, SERVER_C
 	handler_init_socket(connection, server);
 }
 
+void send_404(CONNECTION_CONTEXT* connection, SERVER_CONTEXT* server)
+{
+	memset(connection->head_cbuffer, 0, CONTEXT_OUTPUT_BUFFER_SIZE);
+	connection->tfb.HeadLength = sprintf_s(connection->head_cbuffer, CONTEXT_OUTPUT_BUFFER_SIZE, FORMAT_HTTP_RESPONSE_404);
+	connection->tfb.Head = connection->head_cbuffer;
+	if (FALSE == TransmitFile(connection->acceptSocket, NULL, 0, 0 /* default */,
+		&connection->overlapped, &connection->tfb, TF_DISCONNECT))
+	{
+		if (WSAGetLastError() != ERROR_IO_PENDING)
+		{
+			BOOST_LOG_TRIVIAL(error) << "ERROR: Failed to transmit file";
+			closesocket(connection->acceptSocket);
+			connection->acceptSocket = INVALID_SOCKET;
+		}
+		else
+		{
+			connection->state = CONTEXT_STATE_PENDING_XMITFILE;
+		}
+	}
+	else
+	{
+		BOOST_LOG_TRIVIAL(info) << "sync transmit?";
+	}
+}
+
 void on_pending_accept(DWORD nbxfer, CONNECTION_CONTEXT* connection, SERVER_CONTEXT* server)
 {
 	BOOL parse_is_valid = false;
@@ -146,16 +172,14 @@ void on_pending_accept(DWORD nbxfer, CONNECTION_CONTEXT* connection, SERVER_CONT
 	if (connection->request.hasError)
 	{
 		BOOST_LOG_TRIVIAL(error) << "PARSE ERROR NEAR: " << connection->request.errorNear;
-		// what now
-		// close the socket
 		closesocket(connection->acceptSocket);
 		connection->acceptSocket = INVALID_SOCKET;
-		//free_cnn->flags = 0;
 		BOOST_LOG_TRIVIAL(info) << "putting socket back into wait for accept mode";
 		handler_init_socket(connection, server);
 	}
 	else
 	{
+		// log request info
 		BOOST_LOG_TRIVIAL(info) << "VERB = " << connection->request.verb;
 		BOOST_LOG_TRIVIAL(info) << "RESOURCE = " << connection->request.resource;
 		BOOST_LOG_TRIVIAL(info) << "HTTP VERSION = " << connection->request.version;
@@ -166,23 +190,17 @@ void on_pending_accept(DWORD nbxfer, CONNECTION_CONTEXT* connection, SERVER_CONT
 		parse_is_valid = true;
 	}
 
-	// connection was accepted, now - read
-	/*
-	free_cnn->wsabuf.buf = reinterpret_cast<CHAR*>(free_cnn->buffer);
-	free_cnn->wsabuf.len = CONTEXT_BUFFER_SIZE;
-	if (SOCKET_ERROR == WSARecv(free_cnn->acceptSocket, &free_cnn->wsabuf, 1, nullptr, &flags,
-		reinterpret_cast<LPOVERLAPPED>(free_cnn), nullptr))
-	{
-		if (WSAGetLastError() != WSA_IO_PENDING)
-		{
-			BOOST_LOG_TRIVIAL(error) << "ERROR: Failed to recv";
-		}
-	}
-	free_cnn->state = CONTEXT_STATE_PENDING_RECV;
-	*/
-
 	if (TRUE == parse_is_valid)
 	{
+
+		// turn the resource into a local path
+		// check for empty resource
+		if (connection->request.resource.size_bytes() < 1)
+		{
+			// 404 not found
+			send_404(connection, server);
+			return;
+		}
 
 		// convert any fslsh to bkslsh in resource
 		for (auto iter = connection->request.resource.begin();
@@ -192,19 +210,48 @@ void on_pending_accept(DWORD nbxfer, CONNECTION_CONTEXT* connection, SERVER_CONT
 			if (*iter == '/') *iter = '\\';
 		}
 
+		// if resource length > max path send 404
+		// + 1 for null terminator
+		if (connection->request.resource.size_bytes() > (MAX_PATH - 1))
+		{
+			// 404 not found
+			send_404(connection, server);
+			return;
+		}
+
 		// clear path var
 		memset(connection->path_of_file_to_return, 0, MAX_PATH * sizeof(wchar_t));
 
 		// convert resource to wcs in path
 		size_t numOfCharConverted = 0;
-		mbstowcs_s(&numOfCharConverted, connection->path_of_file_to_return, MAX_PATH,
+		errno_t err_result = mbstowcs_s(&numOfCharConverted, connection->path_of_file_to_return, MAX_PATH,
 			connection->request.resource.data(), connection->request.resource.size_bytes());
-
-		if (connection->path_of_file_to_return[numOfCharConverted - 2] == '\\')
+		if (err_result > 0 || numOfCharConverted < 1)
 		{
-			wcscat_s(connection->path_of_file_to_return, MAX_PATH, L"index.html");
+			send_404(connection, server);
+			return;
 		}
 
+		// at this point, path must be at least 1 char and a null character
+		// if last character is a trailing blackslash, concatenate index.html
+		if (connection->path_of_file_to_return[numOfCharConverted - 2] == '\\')
+		{
+			// check if it makes path too big, > MAX_CHARS
+			if (wcsnlen_s(connection->path_of_file_to_return, MAX_PATH) > MAX_PATH - 11)
+			{
+				send_404(connection, server);
+				return;
+			}
+			else
+			{
+				wcscat_s(connection->path_of_file_to_return, MAX_PATH, L"index.html");
+			}
+		}
+
+		// here
+
+		// If this path begins with a single backslash, it is 
+		// combined with only the root of the path pointed to by pszPathIn.
 		wchar_t* first_char = connection->path_of_file_to_return;
 		while (*first_char == L'\\') first_char++;
 
@@ -217,7 +264,7 @@ void on_pending_accept(DWORD nbxfer, CONNECTION_CONTEXT* connection, SERVER_CONT
 		{
 			DWORD fileSize = GetFileSize(connection->hFile, nullptr);
 			memset(connection->head_cbuffer, 0, CONTEXT_OUTPUT_BUFFER_SIZE);
-			connection->tfb.HeadLength = sprintf_s(connection->head_cbuffer, CONTEXT_OUTPUT_BUFFER_SIZE, FORMAT_HTTP_RESPONSE_HEAD, fileSize);
+			connection->tfb.HeadLength = sprintf_s(connection->head_cbuffer, CONTEXT_OUTPUT_BUFFER_SIZE, FORMAT_HTTP_RESPONSE_200, fileSize);
 			connection->tfb.Head = connection->head_cbuffer;
 			if (FALSE == TransmitFile(connection->acceptSocket, connection->hFile, fileSize, 0 /* default */,
 				&connection->overlapped, &connection->tfb, TF_DISCONNECT))
@@ -227,6 +274,7 @@ void on_pending_accept(DWORD nbxfer, CONNECTION_CONTEXT* connection, SERVER_CONT
 					BOOST_LOG_TRIVIAL(error) << "ERROR: Failed to transmit file";
 					closesocket(connection->acceptSocket);
 					connection->acceptSocket = INVALID_SOCKET;
+					handler_init_socket(connection, server);
 				}
 				else
 				{
@@ -241,6 +289,8 @@ void on_pending_accept(DWORD nbxfer, CONNECTION_CONTEXT* connection, SERVER_CONT
 		else
 		{
 			BOOST_LOG_TRIVIAL(info) << "can't find input file";
+			send_404(connection, server);
+			return;
 		}
 	}
 }

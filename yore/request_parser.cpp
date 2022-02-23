@@ -7,9 +7,15 @@
 
 const char* VERB_GET = "GET";
 const char* END_OF_REQ = "\r\n\r\n";
+const char* BLANK_STRING = " ";
 
 BOOL starts_with(std::span<char>& cspan, const char* comp, const uint32_t len)
 {
+	// data checks
+	if (cspan.size_bytes() < 1) return FALSE;
+	if (comp == nullptr) return FALSE;
+	if (len < 1) return FALSE;
+
 	size_t min_chars_in_common = cspan.size() < len ? cspan.size() : len;
 	if (min_chars_in_common > 0)
 	{
@@ -24,6 +30,11 @@ BOOL starts_with(std::span<char>& cspan, const char* comp, const uint32_t len)
 
 BOOL starts_with(char* start, char* end, const char* comp, const uint32_t len)
 {
+	// data checks
+	if (start == nullptr || end == nullptr || comp == nullptr) return FALSE;
+	if (len < 1) return FALSE;
+	if (start >= end) return FALSE;
+
 	uint32_t span_length = (uint32_t)(end - start);
 	uint32_t min_chars_in_common = span_length < len ? span_length : len;
 	if (min_chars_in_common > 0)
@@ -39,6 +50,20 @@ BOOL starts_with(char* start, char* end, const char* comp, const uint32_t len)
 
 void parse_http(char* start, char* end, HTTP_REQUEST& request)
 {
+
+	if (start == nullptr || end == nullptr)
+	{
+		request.hasError = TRUE;
+		request.errorNear = std::span<char>();
+		return;
+	}
+
+	if (start >= end)
+	{
+		request.hasError = TRUE;
+		request.errorNear = std::span<char>();
+		return;
+	}
 
 	request.verb = std::span<char>();
 	request.resource = std::span<char>();
