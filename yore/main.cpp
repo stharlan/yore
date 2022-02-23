@@ -28,7 +28,8 @@ using namespace std;
 
 #define NUM_HANDLER_THREADS 4
 #define NUM_CONCURRENT_CONNECTIONS 100
-#define CONTEXT_BUFFER_SIZE 1024
+#define CONTEXT_INPUT_BUFFER_SIZE 8196
+#define CONTEXT_OUTPUT_BUFFER_SIZE 1024
 #define YORE_ROOT L"C:\\yore_root\\"
 
 #define CONN_CTX_LOCKED_BIT 0x01
@@ -68,10 +69,10 @@ struct CONNECTION_CONTEXT
 	uint32_t flags = 0;
 	uint32_t state = CONTEXT_STATE_NULL;
 	SOCKET acceptSocket = INVALID_SOCKET;
-	char cbuffer[CONTEXT_BUFFER_SIZE];			// input buffer
+	char cbuffer[CONTEXT_INPUT_BUFFER_SIZE];			// input buffer
 	WSABUF wsabuf;
 	HANDLE hFile = INVALID_HANDLE_VALUE;
-	char head_cbuffer[CONTEXT_BUFFER_SIZE];		// http output header
+	char head_cbuffer[CONTEXT_OUTPUT_BUFFER_SIZE];		// http output header
 	TRANSMIT_FILE_BUFFERS tfb = {};				// for transmit file
 	HTTP_REQUEST request;						// for parsing request
 	wchar_t path_of_file_to_return[MAX_PATH];
@@ -257,7 +258,7 @@ void handler_init_socket(DWORD threadId, CONNECTION_CONTEXT* connection, SERVER_
 	if (connection->acceptSocket != INVALID_SOCKET)
 	{
 		memset(&connection->overlapped, 0, sizeof(OVERLAPPED));
-		memset(&connection->cbuffer, 0, CONTEXT_BUFFER_SIZE);
+		memset(&connection->cbuffer, 0, CONTEXT_INPUT_BUFFER_SIZE);
 		DWORD nbr = 0;
 
 		// pointer to connection context is the key
@@ -273,7 +274,7 @@ void handler_init_socket(DWORD threadId, CONNECTION_CONTEXT* connection, SERVER_
 		{
 			// acceptex
 			if (FALSE == server->lpfnAcceptEx(server->listenSocket, connection->acceptSocket, connection->cbuffer,
-				CONTEXT_BUFFER_SIZE - ((sizeof(sockaddr_in) + 16) * 2),
+				CONTEXT_INPUT_BUFFER_SIZE - ((sizeof(sockaddr_in) + 16) * 2),
 				sizeof(sockaddr_in) + 16, sizeof(sockaddr_in) + 16,
 				&nbr, reinterpret_cast<LPOVERLAPPED>(connection)))
 			{
@@ -379,11 +380,18 @@ DWORD WINAPI handler_proc(void* parm1)
 					// parse it
 					parse_is_valid = false;
 					parse_http(connection->cbuffer,
-						connection->cbuffer + (nbxfer < CONTEXT_BUFFER_SIZE ? nbxfer : CONTEXT_BUFFER_SIZE),
+						connection->cbuffer + (nbxfer < CONTEXT_INPUT_BUFFER_SIZE ? nbxfer : CONTEXT_INPUT_BUFFER_SIZE),
 						connection->request);
 					if (connection->request.hasError)
 					{
 						BOOST_LOG_TRIVIAL(error) << "PARSE ERROR NEAR: " << connection->request.errorNear;
+						// what now
+						// close the socket
+						closesocket(connection->acceptSocket);
+						connection->acceptSocket = INVALID_SOCKET;
+						//free_cnn->flags = 0;
+						BOOST_LOG_TRIVIAL(info) << "putting socket back into wait for accept mode";
+						handler_init_socket(threadId, connection, server);
 					}
 					else
 					{
@@ -447,8 +455,8 @@ DWORD WINAPI handler_proc(void* parm1)
 						if (connection->hFile != INVALID_HANDLE_VALUE)
 						{
 							DWORD fileSize = GetFileSize(connection->hFile, nullptr);
-							memset(connection->head_cbuffer, 0, CONTEXT_BUFFER_SIZE);
-							connection->tfb.HeadLength = sprintf_s(connection->head_cbuffer, CONTEXT_BUFFER_SIZE, FORMAT_HTTP_RESPONSE_HEAD, fileSize);
+							memset(connection->head_cbuffer, 0, CONTEXT_OUTPUT_BUFFER_SIZE);
+							connection->tfb.HeadLength = sprintf_s(connection->head_cbuffer, CONTEXT_OUTPUT_BUFFER_SIZE, FORMAT_HTTP_RESPONSE_HEAD, fileSize);
 							connection->tfb.Head = connection->head_cbuffer;
 							if (FALSE == TransmitFile(connection->acceptSocket, connection->hFile, fileSize, 0 /* default */,
 								&connection->overlapped, &connection->tfb, TF_DISCONNECT))
