@@ -1,6 +1,7 @@
 
 #pragma comment(lib, "ws2_32.lib")
 #pragma comment(lib, "mswsock.lib")
+#pragma comment(lib, "Pathcch.lib")
 #pragma comment(lib, "libboost_atomic-vc143-mt-gd-x64-1_78.lib")
 #pragma comment(lib, "libboost_chrono-vc143-mt-gd-x64-1_78.lib")
 #pragma comment(lib, "libboost_filesystem-vc143-mt-gd-x64-1_78.lib")
@@ -12,6 +13,7 @@
 #include <WinSock2.h>
 #include <WS2tcpip.h>
 #include <MSWSock.h>
+#include <PathCch.h>
 #include <iostream>
 #include <span>
 #include <boost/log/trivial.hpp>
@@ -27,6 +29,7 @@ using namespace std;
 #define NUM_HANDLER_THREADS 4
 #define NUM_CONCURRENT_CONNECTIONS 100
 #define CONTEXT_BUFFER_SIZE 1024
+#define YORE_ROOT L"C:\\yore_root\\"
 
 #define CONN_CTX_LOCKED_BIT 0x01
 
@@ -61,16 +64,17 @@ struct HTTP_REQUEST
 
 struct CONNECTION_CONTEXT
 {
-	OVERLAPPED overlapped = {}; // must be first
+	OVERLAPPED overlapped = {};					// must be first in struct
 	uint32_t flags = 0;
 	uint32_t state = CONTEXT_STATE_NULL;
 	SOCKET acceptSocket = INVALID_SOCKET;
-	char cbuffer[CONTEXT_BUFFER_SIZE];
+	char cbuffer[CONTEXT_BUFFER_SIZE];			// input buffer
 	WSABUF wsabuf;
 	HANDLE hFile = INVALID_HANDLE_VALUE;
-	char head_cbuffer[CONTEXT_BUFFER_SIZE];
-	TRANSMIT_FILE_BUFFERS tfb = {};
-	HTTP_REQUEST request;
+	char head_cbuffer[CONTEXT_BUFFER_SIZE];		// http output header
+	TRANSMIT_FILE_BUFFERS tfb = {};				// for transmit file
+	HTTP_REQUEST request;						// for parsing request
+	wchar_t path_of_file_to_return[MAX_PATH];
 };
 
 struct SERVER_CONTEXT
@@ -311,6 +315,7 @@ DWORD WINAPI handler_proc(void* parm1)
 	LPOVERLAPPED lpovlp = nullptr;
 	DWORD threadId = GetCurrentThreadId();
 	BOOL done = FALSE;
+	BOOL parse_is_valid = false;
 
 	while (!done)
 	{
@@ -372,6 +377,7 @@ DWORD WINAPI handler_proc(void* parm1)
 					BOOST_LOG_TRIVIAL(info) << nbxfer << " bytes transferred";
 
 					// parse it
+					parse_is_valid = false;
 					parse_http(connection->cbuffer,
 						connection->cbuffer + (nbxfer < CONTEXT_BUFFER_SIZE ? nbxfer : CONTEXT_BUFFER_SIZE),
 						connection->request);
@@ -388,6 +394,7 @@ DWORD WINAPI handler_proc(void* parm1)
 						{
 							BOOST_LOG_TRIVIAL(info) << "HEADER = " << h;
 						}
+						parse_is_valid = true;
 					}
 
 					// connection was accepted, now - read
@@ -404,37 +411,69 @@ DWORD WINAPI handler_proc(void* parm1)
 					}
 					free_cnn->state = CONTEXT_STATE_PENDING_RECV;
 					*/
-					connection->hFile = CreateFile(L"c:\\temp\\index.html", GENERIC_READ, FILE_SHARE_READ, nullptr,
-						OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-					if (connection->hFile != INVALID_HANDLE_VALUE)
+
+					if (TRUE == parse_is_valid)
 					{
-						DWORD fileSize = GetFileSize(connection->hFile, nullptr);
-						memset(connection->head_cbuffer, 0, CONTEXT_BUFFER_SIZE);
-						connection->tfb.HeadLength = sprintf_s(connection->head_cbuffer, CONTEXT_BUFFER_SIZE, FORMAT_HTTP_RESPONSE_HEAD, fileSize);
-						connection->tfb.Head = connection->head_cbuffer;
-						if (FALSE == TransmitFile(connection->acceptSocket, connection->hFile, fileSize, 0 /* default */,
-							&connection->overlapped, &connection->tfb, TF_DISCONNECT))
+
+						// convert any fslsh to bkslsh in resource
+						for (auto iter = connection->request.resource.begin();
+							iter != connection->request.resource.end();
+							++iter)
 						{
-							if (WSAGetLastError() != ERROR_IO_PENDING)
+							if (*iter == '/') *iter = '\\';
+						}
+
+						// clear path var
+						memset(connection->path_of_file_to_return, 0, MAX_PATH * sizeof(wchar_t));
+
+						// convert resource to wcs in path
+						size_t numOfCharConverted = 0;
+						mbstowcs_s(&numOfCharConverted, connection->path_of_file_to_return, MAX_PATH,
+							connection->request.resource.data(), connection->request.resource.size_bytes());
+
+						if (connection->path_of_file_to_return[numOfCharConverted - 2] == '\\')
+						{
+							wcscat_s(connection->path_of_file_to_return, MAX_PATH, L"index.html");
+						}
+
+						wchar_t* first_char = connection->path_of_file_to_return;
+						while (*first_char == L'\\') first_char++;
+
+						PathCchCombine(connection->path_of_file_to_return, MAX_PATH,
+							YORE_ROOT, first_char);
+
+						connection->hFile = CreateFile(connection->path_of_file_to_return, GENERIC_READ, FILE_SHARE_READ, nullptr,
+							OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+						if (connection->hFile != INVALID_HANDLE_VALUE)
+						{
+							DWORD fileSize = GetFileSize(connection->hFile, nullptr);
+							memset(connection->head_cbuffer, 0, CONTEXT_BUFFER_SIZE);
+							connection->tfb.HeadLength = sprintf_s(connection->head_cbuffer, CONTEXT_BUFFER_SIZE, FORMAT_HTTP_RESPONSE_HEAD, fileSize);
+							connection->tfb.Head = connection->head_cbuffer;
+							if (FALSE == TransmitFile(connection->acceptSocket, connection->hFile, fileSize, 0 /* default */,
+								&connection->overlapped, &connection->tfb, TF_DISCONNECT))
 							{
-								BOOST_LOG_TRIVIAL(error) << "ERROR: Failed to transmit file";
-								closesocket(connection->acceptSocket);
-								connection->acceptSocket = INVALID_SOCKET;
-								connection->flags = 0;
+								if (WSAGetLastError() != ERROR_IO_PENDING)
+								{
+									BOOST_LOG_TRIVIAL(error) << "ERROR: Failed to transmit file";
+									closesocket(connection->acceptSocket);
+									connection->acceptSocket = INVALID_SOCKET;
+									connection->flags = 0;
+								}
+								else
+								{
+									connection->state = CONTEXT_STATE_PENDING_XMITFILE;
+								}
 							}
 							else
 							{
-								connection->state = CONTEXT_STATE_PENDING_XMITFILE;
+								BOOST_LOG_TRIVIAL(info) << "sync transmit?";
 							}
 						}
 						else
 						{
-							BOOST_LOG_TRIVIAL(info) << "sync transmit?";
+							BOOST_LOG_TRIVIAL(info) << "can't find input file";
 						}
-					}
-					else
-					{
-						BOOST_LOG_TRIVIAL(info) << "can't find input file";
 					}
 					break;
 				case CONTEXT_STATE_INIT:
