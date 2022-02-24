@@ -23,7 +23,8 @@
 using namespace std;
 
 const char* FORMAT_HTTP_RESPONSE_200 = "HTTP/1.1 200 OK\r\nServer: YORE\r\nContent-Length: %i\r\nContent-Type: text/html\r\n\r\n";
-const char* FORMAT_HTTP_RESPONSE_404 = "HTTP/1.1 404 Not Found\r\nServer: YORE\r\nContent-Length: 0\r\n\r\n";
+const char* FORMAT_HTTP_RESPONSE_404 = "HTTP/1.1 404 Not Found\r\nServer: YORE\r\n\r\n";
+const char* FORMAT_HTTP_RESPONSE_400 = "HTTP/1.1 400 Bad Request\r\nServer: YORE\r\n\r\n";
 
 namespace std {
 	inline boost::log::formatting_ostream& operator<<(boost::log::formatting_ostream& os, std::span<char>& dt)
@@ -34,6 +35,42 @@ namespace std {
 	inline boost::log::formatting_ostream& operator<<(boost::log::formatting_ostream& os, const std::span<char>& dt)
 	{
 		for (const auto c : dt) os << c;
+		return os;
+	}
+	inline boost::log::formatting_ostream& operator<<(boost::log::formatting_ostream& os, wchar_t* dt)
+	{
+		wchar_t* sdt = dt;
+		while (*dt != L'\n' && (dt - sdt) < 512) {
+			char char_out = 0;
+			int retval = 0;
+			if (!wctomb_s(&retval, &char_out, 1, *dt))
+			{
+				os << char_out;
+				dt++;
+			} 
+			else
+			{
+				break;
+			}
+		}
+		return os;
+	}
+	inline boost::log::formatting_ostream& operator<<(boost::log::formatting_ostream& os, const wchar_t* dt)
+	{
+		wchar_t* sdt = (wchar_t*)dt;
+		while (*dt != L'\n' && (dt - sdt) < 512) {
+			char char_out = 0;
+			int retval = 0;
+			if (!wctomb_s(&retval, &char_out, 1, *dt))
+			{
+				os << char_out;
+				dt++;
+			}
+			else
+			{
+				break;
+			}
+		}
 		return os;
 	}
 }
@@ -132,10 +169,20 @@ void on_pending_xmit_file(DWORD nbxfer, CONNECTION_CONTEXT* connection, SERVER_C
 	handler_init_socket(connection, server);
 }
 
-void send_404(CONNECTION_CONTEXT* connection, SERVER_CONTEXT* server)
+void send_response_error(CONNECTION_CONTEXT* connection, SERVER_CONTEXT* server, int responseCode)
 {
 	memset(connection->head_cbuffer, 0, CONTEXT_OUTPUT_BUFFER_SIZE);
-	connection->tfb.HeadLength = sprintf_s(connection->head_cbuffer, CONTEXT_OUTPUT_BUFFER_SIZE, FORMAT_HTTP_RESPONSE_404);
+	switch (responseCode)
+	{
+	case 400:
+		connection->tfb.HeadLength = sprintf_s(connection->head_cbuffer, CONTEXT_OUTPUT_BUFFER_SIZE, FORMAT_HTTP_RESPONSE_400);
+		break;
+	case 404:
+		connection->tfb.HeadLength = sprintf_s(connection->head_cbuffer, CONTEXT_OUTPUT_BUFFER_SIZE, FORMAT_HTTP_RESPONSE_404);
+		break;
+	default:
+		return;
+	}
 	connection->tfb.Head = connection->head_cbuffer;
 	if (FALSE == TransmitFile(connection->acceptSocket, NULL, 0, 0 /* default */,
 		&connection->overlapped, &connection->tfb, TF_DISCONNECT))
@@ -172,10 +219,8 @@ void on_pending_accept(DWORD nbxfer, CONNECTION_CONTEXT* connection, SERVER_CONT
 	if (connection->request.hasError)
 	{
 		BOOST_LOG_TRIVIAL(error) << "PARSE ERROR NEAR: " << connection->request.errorNear;
-		closesocket(connection->acceptSocket);
-		connection->acceptSocket = INVALID_SOCKET;
-		BOOST_LOG_TRIVIAL(info) << "putting socket back into wait for accept mode";
-		handler_init_socket(connection, server);
+		send_response_error(connection, server, 400);
+		return;
 	}
 	else
 	{
@@ -198,7 +243,7 @@ void on_pending_accept(DWORD nbxfer, CONNECTION_CONTEXT* connection, SERVER_CONT
 		if (connection->request.resource.size_bytes() < 1)
 		{
 			// 404 not found
-			send_404(connection, server);
+			send_response_error(connection, server, 404);
 			return;
 		}
 
@@ -215,7 +260,7 @@ void on_pending_accept(DWORD nbxfer, CONNECTION_CONTEXT* connection, SERVER_CONT
 		if (connection->request.resource.size_bytes() > (MAX_PATH - 1))
 		{
 			// 404 not found
-			send_404(connection, server);
+			send_response_error(connection, server, 404);
 			return;
 		}
 
@@ -228,7 +273,7 @@ void on_pending_accept(DWORD nbxfer, CONNECTION_CONTEXT* connection, SERVER_CONT
 			connection->request.resource.data(), connection->request.resource.size_bytes());
 		if (err_result > 0 || numOfCharConverted < 1)
 		{
-			send_404(connection, server);
+			send_response_error(connection, server, 404);
 			return;
 		}
 
@@ -239,7 +284,7 @@ void on_pending_accept(DWORD nbxfer, CONNECTION_CONTEXT* connection, SERVER_CONT
 			// check if it makes path too big, > MAX_CHARS
 			if (wcsnlen_s(connection->path_of_file_to_return, MAX_PATH) > MAX_PATH - 11)
 			{
-				send_404(connection, server);
+				send_response_error(connection, server, 404);
 				return;
 			}
 			else
@@ -262,6 +307,7 @@ void on_pending_accept(DWORD nbxfer, CONNECTION_CONTEXT* connection, SERVER_CONT
 			OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
 		if (connection->hFile != INVALID_HANDLE_VALUE)
 		{
+			BOOST_LOG_TRIVIAL(info) << "Transmitting file: " << connection->path_of_file_to_return;
 			DWORD fileSize = GetFileSize(connection->hFile, nullptr);
 			memset(connection->head_cbuffer, 0, CONTEXT_OUTPUT_BUFFER_SIZE);
 			connection->tfb.HeadLength = sprintf_s(connection->head_cbuffer, CONTEXT_OUTPUT_BUFFER_SIZE, FORMAT_HTTP_RESPONSE_200, fileSize);
@@ -289,7 +335,7 @@ void on_pending_accept(DWORD nbxfer, CONNECTION_CONTEXT* connection, SERVER_CONT
 		else
 		{
 			BOOST_LOG_TRIVIAL(info) << "can't find input file";
-			send_404(connection, server);
+			send_response_error(connection, server, 404);
 			return;
 		}
 	}
@@ -329,9 +375,14 @@ DWORD WINAPI handler_proc(void* parm1)
 			else
 			{
 				// failed operation, can call getlasterror, but, go on
-				DWORD err = GetLastError();
-				BOOST_LOG_TRIVIAL(error) << "unknown error in getqueuedcompletionstatus; 0x" << hex << err << dec;
-				done = TRUE;
+				// from doc:
+				// dequeues a completion packet for a failed I/O operation from the completion port
+				BOOST_LOG_TRIVIAL(error) << "failed i/o operation";
+				BOOST_LOG_TRIVIAL(info) << "putting socket back into wait for accept mode";
+				CONNECTION_CONTEXT* connection = reinterpret_cast<CONNECTION_CONTEXT*>(lpovlp);
+				closesocket(connection->acceptSocket);
+				connection->acceptSocket = INVALID_SOCKET;
+				handler_init_socket(connection, server);
 			}
 		}
 		else if(nbxfer == 0 && ckey == 0 && lpovlp == nullptr)
