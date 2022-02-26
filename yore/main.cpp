@@ -23,8 +23,9 @@
 using namespace std;
 
 const char* FORMAT_HTTP_RESPONSE_200 = "HTTP/1.1 200 OK\r\nServer: YORE\r\nContent-Length: %i\r\nContent-Type: text/html\r\n\r\n";
-const char* FORMAT_HTTP_RESPONSE_404 = "HTTP/1.1 404 Not Found\r\nServer: YORE\r\n\r\n";
 const char* FORMAT_HTTP_RESPONSE_400 = "HTTP/1.1 400 Bad Request\r\nServer: YORE\r\n\r\n";
+const char* FORMAT_HTTP_RESPONSE_403 = "HTTP/1.1 403 Forbidden\r\nServer: YORE\r\n\r\n";
+const char* FORMAT_HTTP_RESPONSE_404 = "HTTP/1.1 404 Not Found\r\nServer: YORE\r\n\r\n";
 
 namespace std {
 	inline boost::log::formatting_ostream& operator<<(boost::log::formatting_ostream& os, std::span<char>& dt)
@@ -175,9 +176,15 @@ void send_response_error(CONNECTION_CONTEXT* connection, SERVER_CONTEXT* server,
 	switch (responseCode)
 	{
 	case 400:
+		BOOST_LOG_TRIVIAL(info) << "returning 400";
 		connection->tfb.HeadLength = sprintf_s(connection->head_cbuffer, CONTEXT_OUTPUT_BUFFER_SIZE, FORMAT_HTTP_RESPONSE_400);
 		break;
+	case 403:
+		BOOST_LOG_TRIVIAL(info) << "returning 403";
+		connection->tfb.HeadLength = sprintf_s(connection->head_cbuffer, CONTEXT_OUTPUT_BUFFER_SIZE, FORMAT_HTTP_RESPONSE_403);
+		break;
 	case 404:
+		BOOST_LOG_TRIVIAL(info) << "returning 404";
 		connection->tfb.HeadLength = sprintf_s(connection->head_cbuffer, CONTEXT_OUTPUT_BUFFER_SIZE, FORMAT_HTTP_RESPONSE_404);
 		break;
 	default:
@@ -303,39 +310,48 @@ void on_pending_accept(DWORD nbxfer, CONNECTION_CONTEXT* connection, SERVER_CONT
 		PathCchCombine(connection->path_of_file_to_return, MAX_PATH,
 			YORE_ROOT, first_char);
 
-		connection->hFile = CreateFile(connection->path_of_file_to_return, GENERIC_READ, FILE_SHARE_READ, nullptr,
-			OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-		if (connection->hFile != INVALID_HANDLE_VALUE)
+		if(wcsncmp(connection->path_of_file_to_return, YORE_ROOT, wcslen(YORE_ROOT)) == 0)
 		{
-			BOOST_LOG_TRIVIAL(info) << "Transmitting file: " << connection->path_of_file_to_return;
-			DWORD fileSize = GetFileSize(connection->hFile, nullptr);
-			memset(connection->head_cbuffer, 0, CONTEXT_OUTPUT_BUFFER_SIZE);
-			connection->tfb.HeadLength = sprintf_s(connection->head_cbuffer, CONTEXT_OUTPUT_BUFFER_SIZE, FORMAT_HTTP_RESPONSE_200, fileSize);
-			connection->tfb.Head = connection->head_cbuffer;
-			if (FALSE == TransmitFile(connection->acceptSocket, connection->hFile, fileSize, 0 /* default */,
-				&connection->overlapped, &connection->tfb, TF_DISCONNECT))
+			connection->hFile = CreateFile(connection->path_of_file_to_return, GENERIC_READ, FILE_SHARE_READ, nullptr,
+				OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+			if (connection->hFile != INVALID_HANDLE_VALUE)
 			{
-				if (WSAGetLastError() != ERROR_IO_PENDING)
+				BOOST_LOG_TRIVIAL(info) << "Transmitting file: " << connection->path_of_file_to_return;
+				DWORD fileSize = GetFileSize(connection->hFile, nullptr);
+				memset(connection->head_cbuffer, 0, CONTEXT_OUTPUT_BUFFER_SIZE);
+				connection->tfb.HeadLength = sprintf_s(connection->head_cbuffer, CONTEXT_OUTPUT_BUFFER_SIZE, FORMAT_HTTP_RESPONSE_200, fileSize);
+				connection->tfb.Head = connection->head_cbuffer;
+				if (FALSE == TransmitFile(connection->acceptSocket, connection->hFile, fileSize, 0 /* default */,
+					&connection->overlapped, &connection->tfb, TF_DISCONNECT))
 				{
-					BOOST_LOG_TRIVIAL(error) << "ERROR: Failed to transmit file";
-					closesocket(connection->acceptSocket);
-					connection->acceptSocket = INVALID_SOCKET;
-					handler_init_socket(connection, server);
+					if (WSAGetLastError() != ERROR_IO_PENDING)
+					{
+						BOOST_LOG_TRIVIAL(error) << "ERROR: Failed to transmit file";
+						closesocket(connection->acceptSocket);
+						connection->acceptSocket = INVALID_SOCKET;
+						handler_init_socket(connection, server);
+					}
+					else
+					{
+						connection->state = CONTEXT_STATE_PENDING_XMITFILE;
+					}
 				}
 				else
 				{
-					connection->state = CONTEXT_STATE_PENDING_XMITFILE;
+					BOOST_LOG_TRIVIAL(info) << "sync transmit?";
 				}
 			}
 			else
 			{
-				BOOST_LOG_TRIVIAL(info) << "sync transmit?";
+				BOOST_LOG_TRIVIAL(info) << "can't find input file: '" << connection->path_of_file_to_return << "'";
+				send_response_error(connection, server, 404);
+				return;
 			}
 		}
 		else
 		{
-			BOOST_LOG_TRIVIAL(info) << "can't find input file";
-			send_response_error(connection, server, 404);
+			BOOST_LOG_TRIVIAL(info) << "can't find input file: '" << connection->path_of_file_to_return << "'";
+			send_response_error(connection, server, 403);
 			return;
 		}
 	}

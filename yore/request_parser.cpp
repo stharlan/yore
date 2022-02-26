@@ -97,7 +97,13 @@ void parse_http(char* start, char* end, HTTP_REQUEST& request)
 	MOVE_THROUGH_WHITESPACE;
 	istart = start;
 
-	MOVE_TO_EOL;
+	//MOVE_TO_EOL;
+	while ((*start != '\r') && (*start != '\n') && (start < end))start++;
+	if (start == end) { 
+		request.hasError = TRUE; 
+		request.errorNear = std::span<char>(start, start); 
+		return; 
+	}
 	if (starts_with(start, end, END_OF_REQ, 4))
 	{
 		// end of request
@@ -127,6 +133,10 @@ void parse_http(char* start, char* end, HTTP_REQUEST& request)
 			request.headers.push_back(std::span<char>(istart, start));
 		}
 	}
+
+	// error request was not properly ended 
+	request.hasError = TRUE;
+	request.errorNear = std::span<char>(start, start + ((end - start) < 5 ? (end - start) : 5));
 
 	return;
 }
