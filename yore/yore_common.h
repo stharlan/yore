@@ -7,7 +7,7 @@
 #define MOVE_TO_EOL while((*start!='\r')&&(*start!='\n')&&(start<end))start++;END_CHECK;
 
 #define NUM_HANDLER_THREADS 4
-#define NUM_CONCURRENT_CONNECTIONS 100
+#define NUM_CONCURRENT_CONNECTIONS 5
 #define CONTEXT_INPUT_BUFFER_SIZE 8196
 #define CONTEXT_OUTPUT_BUFFER_SIZE 1024
 #define YORE_ROOT L"C:\\yore_root\\"

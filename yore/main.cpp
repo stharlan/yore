@@ -163,11 +163,29 @@ void on_pending_xmit_file(DWORD nbxfer, CONNECTION_CONTEXT* connection, SERVER_C
 	BOOST_LOG_TRIVIAL(info) << nbxfer << " bytes transferred";
 	CloseHandle(connection->hFile);
 	connection->hFile = INVALID_HANDLE_VALUE;
-	closesocket(connection->acceptSocket);
-	connection->acceptSocket = INVALID_SOCKET;
-	//free_cnn->flags = 0;
-	BOOST_LOG_TRIVIAL(info) << "putting socket back into wait for accept mode";
-	handler_init_socket(connection, server);
+
+	// ok, instead, put the socket back into recv mode
+	// TODO should probably only do this if keep alive is specified
+	// otherwise, return to acceptex state
+	connection->wsabuf.buf = connection->cbuffer;
+	connection->wsabuf.len = CONTEXT_INPUT_BUFFER_SIZE;
+	memset(connection->cbuffer, 0, CONTEXT_INPUT_BUFFER_SIZE);
+	connection->state = CONTEXT_STATE_PENDING_RECV;
+	DWORD nbr = 0;
+	DWORD flags = 0;
+	if (SOCKET_ERROR == WSARecv(connection->acceptSocket, &connection->wsabuf, 1, &nbr, &flags, (LPWSAOVERLAPPED)connection, nullptr))
+	{
+		if (WSA_IO_PENDING != WSAGetLastError())
+		{
+			// error
+			BOOST_LOG_TRIVIAL(error) << "ERROR: Failed to wsarecv";
+			closesocket(connection->acceptSocket);
+			connection->acceptSocket = INVALID_SOCKET;
+			BOOST_LOG_TRIVIAL(info) << "putting socket back into wait for accept mode";
+			handler_init_socket(connection, server);
+		}
+		// else, recv ok and io pending
+	}
 }
 
 void send_response_error(CONNECTION_CONTEXT* connection, SERVER_CONTEXT* server, int responseCode)
@@ -211,7 +229,7 @@ void send_response_error(CONNECTION_CONTEXT* connection, SERVER_CONTEXT* server,
 	}
 }
 
-void on_pending_accept(DWORD nbxfer, CONNECTION_CONTEXT* connection, SERVER_CONTEXT* server)
+void on_parse_received_data(DWORD nbxfer, CONNECTION_CONTEXT* connection, SERVER_CONTEXT* server)
 {
 	BOOL parse_is_valid = false;
 
@@ -418,8 +436,9 @@ DWORD WINAPI handler_proc(void* parm1)
 				case CONTEXT_STATE_PENDING_XMITFILE:
 					on_pending_xmit_file(nbxfer, connection, server);
 					break;
+				case CONTEXT_STATE_PENDING_RECV:
 				case CONTEXT_STATE_PENDING_ACCEPT:
-					on_pending_accept(nbxfer, connection, server);
+					on_parse_received_data(nbxfer, connection, server);
 					break;
 				case CONTEXT_STATE_INIT:
 					handler_init_socket(connection, server);
@@ -448,6 +467,14 @@ BOOL WINAPI ControlCHandler(
 		return TRUE;
 	}
 	return FALSE;
+}
+
+VOID CALLBACK ConnectionCheckTimerProc(
+	HWND hwnd,        // handle to window for timer messages 
+	UINT message,     // WM_TIMER message 
+	UINT_PTR idTimer,     // timer identifier 
+	DWORD dwTime)     // current system time 
+{
 }
 
 int main(int argc, char** argv)
@@ -553,7 +580,34 @@ int main(int argc, char** argv)
 	}
 
 	BOOST_LOG_TRIVIAL(info) << "Ready...";
-	WaitForSingleObject(g_hQuitEvent, INFINITE);
+	while (WAIT_OBJECT_0 != WaitForSingleObject(g_hQuitEvent, 5000))
+	{
+		BOOST_LOG_TRIVIAL(info) << "Checking connections...";
+		const vector<CONNECTION_CONTEXT> cv(server.connections, server.connections + NUM_CONCURRENT_CONNECTIONS);
+		for (const auto& ctx : cv)
+		{
+			INT seconds;
+			INT bytes = sizeof(seconds);
+			int iResult = 0;
+
+			iResult = getsockopt(ctx.acceptSocket, SOL_SOCKET, SO_CONNECT_TIME,
+				(char*)&seconds, (PINT)&bytes);
+
+			if (iResult == NO_ERROR) 
+			{
+				if (seconds == -1)
+				{
+					BOOST_LOG_TRIVIAL(info) << "Socket 0x" << hex << ctx.acceptSocket << dec << " is not connected";
+				}
+				else
+				{
+					BOOST_LOG_TRIVIAL(info) << "Socket 0x" << hex << ctx.acceptSocket << dec << " connection time = " << seconds << " s";
+					// TODO if connection has been alive for n seconds close and call acceptex
+					// apache default is 15 seconds
+				}
+			}
+		}		
+	}
 
 	CloseHandle(g_hQuitEvent);
 
