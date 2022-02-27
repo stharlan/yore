@@ -18,12 +18,18 @@
 #define CONTEXT_STATE_PENDING_RECV 0x03
 #define CONTEXT_STATE_PENDING_XMITFILE 0x04
 
+struct HTTP_HEADER
+{
+	std::span<char> header_name;
+	std::span<char> header_value;
+};
+
 struct HTTP_REQUEST
 {
 	std::span<char> verb;
 	std::span<char> resource;
 	std::span<char> version;
-	std::vector<std::span<char>> headers;
+	std::vector<HTTP_HEADER> headers;
 	BOOL hasError;
 	std::span<char> errorNear;
 };

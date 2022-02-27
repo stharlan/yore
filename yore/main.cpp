@@ -38,6 +38,16 @@ namespace std {
 		for (const auto c : dt) os << c;
 		return os;
 	}
+	inline boost::log::formatting_ostream& operator<<(boost::log::formatting_ostream& os, HTTP_HEADER& dt)
+	{
+		os << "HEADER: '" << dt.header_name << " = '" << dt.header_value << "'";
+		return os;
+	}
+	inline boost::log::formatting_ostream& operator<<(boost::log::formatting_ostream& os, const HTTP_HEADER& dt)
+	{
+		os << "HEADER: '" << dt.header_name << " = '" << dt.header_value << "'";
+		return os;
+	}
 	inline boost::log::formatting_ostream& operator<<(boost::log::formatting_ostream& os, wchar_t* dt)
 	{
 		wchar_t* sdt = dt;
@@ -74,6 +84,64 @@ namespace std {
 		}
 		return os;
 	}
+}
+
+BOOL get_header_value(const char* header_name, std::span<char>& value, CONNECTION_CONTEXT* cnn)
+{
+	//std::span<char> hdr_name;
+	//std::span<char> hdr_value;
+	//for (const std::span<char>& hdr : cnn->request.headers)
+	//{
+	//	char* cs = nullptr;
+	//	char* ce = nullptr;
+	//	int state = 0;
+	//	//for (std::span<char>::iterator i = hdr.begin(); i != hdr.end(); ++i)
+	//	for(auto chr : hdr)
+	//	{
+	//		switch (state)
+	//		{
+	//		case 0:
+	//			if (chr != ' ') {
+	//				cs = &chr;
+	//				state = 1;
+	//			}
+	//			break;
+	//		case 1:
+	//			if (chr == ' ' || chr == ':')
+	//			{
+	//				hdr_name = std::span<char>(&cs, &chr);
+	//				if (chr == ' ')
+	//				{
+	//					state = 2;
+	//				}
+	//				else
+	//				{
+	//					state = 3;
+	//				}					
+	//			}
+	//			break;
+	//		case 2:
+	//			if (chr == ':') state = 3;
+	//			break;
+	//		case 3:
+	//			if (chr != ' ')
+	//			{
+	//				cs = chr;
+	//				state = 4;
+	//			}
+	//			break;
+	//		default:
+	//			ce = chr;
+	//			break;
+	//		}
+	//	}
+	//	if (state == 4)
+	//	{
+	//		hdr_value = std::span<char>(&cs, ce);
+	//	}
+	//	BOOST_LOG_TRIVIAL(info) << "HDR '" << hdr_name << "' = '" << hdr_value << "'";
+	//}
+	return FALSE;
 }
 
 void init_connections(SERVER_CONTEXT* svr)
@@ -157,16 +225,8 @@ void handler_init_socket(CONNECTION_CONTEXT* connection, SERVER_CONTEXT* server)
 	}
 }
 
-void on_pending_xmit_file(DWORD nbxfer, CONNECTION_CONTEXT* connection, SERVER_CONTEXT* server)
+void post_recv(CONNECTION_CONTEXT* connection, SERVER_CONTEXT* server)
 {
-	BOOST_LOG_TRIVIAL(info) << "file transmitted...";
-	BOOST_LOG_TRIVIAL(info) << nbxfer << " bytes transferred";
-	CloseHandle(connection->hFile);
-	connection->hFile = INVALID_HANDLE_VALUE;
-
-	// ok, instead, put the socket back into recv mode
-	// TODO should probably only do this if keep alive is specified
-	// otherwise, return to acceptex state
 	connection->wsabuf.buf = connection->cbuffer;
 	connection->wsabuf.len = CONTEXT_INPUT_BUFFER_SIZE;
 	memset(connection->cbuffer, 0, CONTEXT_INPUT_BUFFER_SIZE);
@@ -181,11 +241,33 @@ void on_pending_xmit_file(DWORD nbxfer, CONNECTION_CONTEXT* connection, SERVER_C
 			BOOST_LOG_TRIVIAL(error) << "ERROR: Failed to wsarecv";
 			closesocket(connection->acceptSocket);
 			connection->acceptSocket = INVALID_SOCKET;
-			BOOST_LOG_TRIVIAL(info) << "putting socket back into wait for accept mode";
+			BOOST_LOG_TRIVIAL(info) << "putting socket " << hex << connection->acceptSocket << dec << " back into wait for accept mode";
 			handler_init_socket(connection, server);
 		}
 		// else, recv ok and io pending
+		else
+		{
+			BOOST_LOG_TRIVIAL(info) << "putting socket " << hex << connection->acceptSocket << dec << " back into recv";
+		}
 	}
+}
+
+void on_pending_xmit_file(DWORD nbxfer, CONNECTION_CONTEXT* connection, SERVER_CONTEXT* server)
+{
+	BOOST_LOG_TRIVIAL(info) << "file transmitted...";
+	BOOST_LOG_TRIVIAL(info) << nbxfer << " bytes transferred on xmit file";
+	CloseHandle(connection->hFile);
+	connection->hFile = INVALID_HANDLE_VALUE;
+
+	// ok, instead, put the socket back into recv mode
+	// TODO should probably only do this if keep alive is specified
+	// otherwise, return to acceptex state
+
+	// Connection: keep-alive
+	//std::span<char> hdr_value;
+	//get_header_value("Connection", hdr_value, connection);
+
+	post_recv(connection, server);
 }
 
 void send_response_error(CONNECTION_CONTEXT* connection, SERVER_CONTEXT* server, int responseCode)
@@ -233,8 +315,14 @@ void on_parse_received_data(DWORD nbxfer, CONNECTION_CONTEXT* connection, SERVER
 {
 	BOOL parse_is_valid = false;
 
-	BOOST_LOG_TRIVIAL(info) << "==> CONNECTION ACCEPTED <==, entering recv...";
 	BOOST_LOG_TRIVIAL(info) << nbxfer << " bytes transferred";
+
+	if (nbxfer < 1)
+	{
+		BOOST_LOG_TRIVIAL(info) << "no data to parse; returning 400";
+		send_response_error(connection, server, 400);
+		return;
+	}
 
 	// parse it
 	parse_is_valid = false;
@@ -255,7 +343,7 @@ void on_parse_received_data(DWORD nbxfer, CONNECTION_CONTEXT* connection, SERVER
 		BOOST_LOG_TRIVIAL(info) << "HTTP VERSION = " << connection->request.version;
 		for (const auto& h : connection->request.headers)
 		{
-			BOOST_LOG_TRIVIAL(info) << "HEADER = " << h;
+			BOOST_LOG_TRIVIAL(info) << h;
 		}
 		parse_is_valid = true;
 	}
@@ -317,8 +405,6 @@ void on_parse_received_data(DWORD nbxfer, CONNECTION_CONTEXT* connection, SERVER
 				wcscat_s(connection->path_of_file_to_return, MAX_PATH, L"index.html");
 			}
 		}
-
-		// here
 
 		// If this path begins with a single backslash, it is 
 		// combined with only the root of the path pointed to by pszPathIn.
@@ -391,7 +477,7 @@ DWORD WINAPI handler_proc(void* parm1)
 		//BOOST_LOG_TRIVIAL(info) << "waiting for packet...";
 		if (FALSE == GetQueuedCompletionStatus(server->hIocp, &nbxfer, &ckey, &lpovlp, INFINITE))
 		{
-			BOOST_LOG_TRIVIAL(error) << "get queued compl st failed...";
+			BOOST_LOG_TRIVIAL(error) << "!! GOT IO: get queued compl st failed...";
 			if (lpovlp == nullptr)
 			{
 				if (ERROR_ABANDONED_WAIT_0 == GetLastError())
@@ -411,9 +497,9 @@ DWORD WINAPI handler_proc(void* parm1)
 				// failed operation, can call getlasterror, but, go on
 				// from doc:
 				// dequeues a completion packet for a failed I/O operation from the completion port
-				BOOST_LOG_TRIVIAL(error) << "failed i/o operation";
-				BOOST_LOG_TRIVIAL(info) << "putting socket back into wait for accept mode";
 				CONNECTION_CONTEXT* connection = reinterpret_cast<CONNECTION_CONTEXT*>(lpovlp);
+				BOOST_LOG_TRIVIAL(error) << "failed i/o operation; 0x" << hex << GetLastError() << dec;
+				BOOST_LOG_TRIVIAL(info) << "putting socket " << hex << connection->acceptSocket << dec << " back into wait for accept mode";
 				closesocket(connection->acceptSocket);
 				connection->acceptSocket = INVALID_SOCKET;
 				handler_init_socket(connection, server);
@@ -421,12 +507,19 @@ DWORD WINAPI handler_proc(void* parm1)
 		}
 		else if(nbxfer == 0 && ckey == 0 && lpovlp == nullptr)
 		{
-			BOOST_LOG_TRIVIAL(info) << "got quit packet...";
+			BOOST_LOG_TRIVIAL(info) << "!! GOT IO: got quit packet...";
 			done = TRUE;
 		}
+		//else if (nbxfer == 0 && lpovlp != nullptr)
+		//{
+		//	// put back in recv?
+		//	BOOST_LOG_TRIVIAL(info) << "!! GOT IO: no data recevied; post recv again";
+		//	CONNECTION_CONTEXT* connection = reinterpret_cast<CONNECTION_CONTEXT*>(lpovlp);
+		//	post_recv(connection, server);
+		//}
 		else if(lpovlp != nullptr)
 		{
-			//BOOST_LOG_TRIVIAL(info) << "got packet...";
+			BOOST_LOG_TRIVIAL(info) << "!! GOT IO: OK";
 			CONNECTION_CONTEXT* connection = reinterpret_cast<CONNECTION_CONTEXT*>(lpovlp);
 			if (connection != nullptr)
 			{
@@ -437,11 +530,34 @@ DWORD WINAPI handler_proc(void* parm1)
 					on_pending_xmit_file(nbxfer, connection, server);
 					break;
 				case CONTEXT_STATE_PENDING_RECV:
+					BOOST_LOG_TRIVIAL(info) << "CONTEXT_STATE_PENDING_RECV";
+					// if no bytes transferred, socket closed?
+					if (nbxfer == 0)
+					{
+						BOOST_LOG_TRIVIAL(info) << "no data; resetting socket " << hex << connection->acceptSocket << dec;
+						closesocket(connection->acceptSocket);
+						connection->acceptSocket = INVALID_SOCKET;
+						handler_init_socket(connection, server);
+					}
+					else
+					{
+						on_parse_received_data(nbxfer, connection, server);
+					}
+					break;
 				case CONTEXT_STATE_PENDING_ACCEPT:
+					BOOST_LOG_TRIVIAL(info) << "CONTEXT_STATE_PENDING_ACCEPT";
+					BOOST_LOG_TRIVIAL(info) << "==> CONNECTION ACCEPTED <== on socket " << hex << connection->acceptSocket << dec << "; entering recv...";
 					on_parse_received_data(nbxfer, connection, server);
 					break;
 				case CONTEXT_STATE_INIT:
 					handler_init_socket(connection, server);
+					break;
+				default:
+					if (nbxfer == 0)
+					{
+						BOOST_LOG_TRIVIAL(info) << "no data recevied; post recv again";
+						post_recv(connection, server);
+					}
 					break;
 				}
 			}
