@@ -450,6 +450,10 @@ void on_parse_received_data(DWORD nbxfer, CONNECTION_CONTEXT* connection, SERVER
 				add_header_server(connection, "YORE");
 				add_header_content_length(connection, fileSize);
 				add_header_content_type(connection, "text/html");
+				if (connection->keep_alive)
+				{
+					add_header_custom(connection, HEADER_NAME_CONNECTION, HEADER_VALUE_KEEP_ALIVE);
+				}
 				complete_response(connection);
 				connection->tfb.HeadLength = (DWORD)strlen(connection->output_buffer);
 				connection->tfb.Head = connection->output_buffer;
