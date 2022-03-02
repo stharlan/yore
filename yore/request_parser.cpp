@@ -3,11 +3,25 @@
 #include <MSWSock.h>
 #include <span>
 #include <vector>
+#include <intrin.h>
 #include "yore_common.h"
 
 const char* VERB_GET = "GET";
 const char* END_OF_REQ = "\r\n\r\n";
 const char* BLANK_STRING = " ";
+
+BOOL span_equals_string(const std::span<char>& str_span, const char* str)
+{
+	if (str == nullptr) return FALSE;
+	uint32_t len = strlen(str);
+	if (str_span.size_bytes() != len) return FALSE;
+	uint32_t ctr = 0;
+	for (const auto& sc : str_span)
+	{
+		if (sc != str[ctr++]) return FALSE;
+	}
+	return TRUE;
+}
 
 BOOL starts_with(std::span<char>& cspan, const char* comp, const uint32_t len)
 {

@@ -34,18 +34,25 @@ struct HTTP_REQUEST
 	std::span<char> errorNear;
 };
 
+struct HTTP_RESPONSE
+{
+	char* buffer = nullptr;
+	uint32_t buffer_length = 0;
+	uint32_t position = 0;
+};
+
 struct CONNECTION_CONTEXT
 {
 	OVERLAPPED overlapped = {};					// must be first in struct
-	//uint32_t flags = 0;
 	uint32_t state = CONTEXT_STATE_NULL;
 	SOCKET acceptSocket = INVALID_SOCKET;
-	char cbuffer[CONTEXT_INPUT_BUFFER_SIZE];			// input buffer
+	char input_buffer[CONTEXT_INPUT_BUFFER_SIZE];			// input buffer
 	WSABUF wsabuf;
 	HANDLE hFile = INVALID_HANDLE_VALUE;
-	char head_cbuffer[CONTEXT_OUTPUT_BUFFER_SIZE];		// http output header
+	char output_buffer[CONTEXT_OUTPUT_BUFFER_SIZE];		// http output header
 	TRANSMIT_FILE_BUFFERS tfb = {};				// for transmit file
 	HTTP_REQUEST request;						// for parsing request
+	HTTP_RESPONSE response;
 	wchar_t path_of_file_to_return[MAX_PATH];
 };
 
@@ -59,3 +66,4 @@ struct SERVER_CONTEXT
 };
 
 void parse_http(char* start, char* end, HTTP_REQUEST& request);
+BOOL span_equals_string(const std::span<char>& str_span, const char* str);

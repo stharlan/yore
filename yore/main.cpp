@@ -22,11 +22,6 @@
 
 using namespace std;
 
-const char* FORMAT_HTTP_RESPONSE_200 = "HTTP/1.1 200 OK\r\nServer: YORE\r\nContent-Length: %i\r\nContent-Type: text/html\r\n\r\n";
-const char* FORMAT_HTTP_RESPONSE_400 = "HTTP/1.1 400 Bad Request\r\nServer: YORE\r\n\r\n";
-const char* FORMAT_HTTP_RESPONSE_403 = "HTTP/1.1 403 Forbidden\r\nServer: YORE\r\n\r\n";
-const char* FORMAT_HTTP_RESPONSE_404 = "HTTP/1.1 404 Not Found\r\nServer: YORE\r\n\r\n";
-
 namespace std {
 	inline boost::log::formatting_ostream& operator<<(boost::log::formatting_ostream& os, std::span<char>& dt)
 	{
@@ -40,12 +35,12 @@ namespace std {
 	}
 	inline boost::log::formatting_ostream& operator<<(boost::log::formatting_ostream& os, HTTP_HEADER& dt)
 	{
-		os << "HEADER: '" << dt.header_name << " = '" << dt.header_value << "'";
+		os << "HEADER: '" << dt.header_name << "' = '" << dt.header_value << "'";
 		return os;
 	}
 	inline boost::log::formatting_ostream& operator<<(boost::log::formatting_ostream& os, const HTTP_HEADER& dt)
 	{
-		os << "HEADER: '" << dt.header_name << " = '" << dt.header_value << "'";
+		os << "HEADER: '" << dt.header_name << "' = '" << dt.header_value << "'";
 		return os;
 	}
 	inline boost::log::formatting_ostream& operator<<(boost::log::formatting_ostream& os, wchar_t* dt)
@@ -86,61 +81,54 @@ namespace std {
 	}
 }
 
-BOOL get_header_value(const char* header_name, std::span<char>& value, CONNECTION_CONTEXT* cnn)
+void start_response(CONNECTION_CONTEXT* connection, const char* response_code, const char* response_descr)
 {
-	//std::span<char> hdr_name;
-	//std::span<char> hdr_value;
-	//for (const std::span<char>& hdr : cnn->request.headers)
-	//{
-	//	char* cs = nullptr;
-	//	char* ce = nullptr;
-	//	int state = 0;
-	//	//for (std::span<char>::iterator i = hdr.begin(); i != hdr.end(); ++i)
-	//	for(auto chr : hdr)
-	//	{
-	//		switch (state)
-	//		{
-	//		case 0:
-	//			if (chr != ' ') {
-	//				cs = &chr;
-	//				state = 1;
-	//			}
-	//			break;
-	//		case 1:
-	//			if (chr == ' ' || chr == ':')
-	//			{
-	//				hdr_name = std::span<char>(&cs, &chr);
-	//				if (chr == ' ')
-	//				{
-	//					state = 2;
-	//				}
-	//				else
-	//				{
-	//					state = 3;
-	//				}					
-	//			}
-	//			break;
-	//		case 2:
-	//			if (chr == ':') state = 3;
-	//			break;
-	//		case 3:
-	//			if (chr != ' ')
-	//			{
-	//				cs = chr;
-	//				state = 4;
-	//			}
-	//			break;
-	//		default:
-	//			ce = chr;
-	//			break;
-	//		}
-	//	}
-	//	if (state == 4)
-	//	{
-	//		hdr_value = std::span<char>(&cs, ce);
-	//	}
-	//	BOOST_LOG_TRIVIAL(info) << "HDR '" << hdr_name << "' = '" << hdr_value << "'";
-	//}
+	memset(connection->output_buffer, 0, CONTEXT_OUTPUT_BUFFER_SIZE);
+	strcpy_s(connection->output_buffer, CONTEXT_OUTPUT_BUFFER_SIZE, "HTTP/1.1 ");
+	strcat_s(connection->output_buffer, CONTEXT_OUTPUT_BUFFER_SIZE, response_code);
+	strcat_s(connection->output_buffer, CONTEXT_OUTPUT_BUFFER_SIZE, " ");
+	strcat_s(connection->output_buffer, CONTEXT_OUTPUT_BUFFER_SIZE, response_descr);
+	strcat_s(connection->output_buffer, CONTEXT_OUTPUT_BUFFER_SIZE, "\r\n");
+}
+
+void add_header_server(CONNECTION_CONTEXT* connection, const char* server_name)
+{
+	strcat_s(connection->output_buffer, CONTEXT_OUTPUT_BUFFER_SIZE, "Server: ");
+	strcat_s(connection->output_buffer, CONTEXT_OUTPUT_BUFFER_SIZE, server_name);
+	strcat_s(connection->output_buffer, CONTEXT_OUTPUT_BUFFER_SIZE, "\r\n");
+}
+
+void add_header_content_length(CONNECTION_CONTEXT* connection, const uint32_t content_length)
+{
+	char temp[16] = { 0 };
+	sprintf_s(temp, 16, "%ui", content_length);
+	strcat_s(connection->output_buffer, CONTEXT_OUTPUT_BUFFER_SIZE, "Content-Length: ");
+	strcat_s(connection->output_buffer, CONTEXT_OUTPUT_BUFFER_SIZE, temp);
+	strcat_s(connection->output_buffer, CONTEXT_OUTPUT_BUFFER_SIZE, "\r\n");
+}
+
+void add_header_content_type(CONNECTION_CONTEXT* connection, const char* content_type)
+{
+	strcat_s(connection->output_buffer, CONTEXT_OUTPUT_BUFFER_SIZE, "Content-Type: ");
+	strcat_s(connection->output_buffer, CONTEXT_OUTPUT_BUFFER_SIZE, content_type);
+	strcat_s(connection->output_buffer, CONTEXT_OUTPUT_BUFFER_SIZE, "\r\n");
+}
+
+void complete_response(CONNECTION_CONTEXT* connection)
+{
+	strcat_s(connection->output_buffer, CONTEXT_OUTPUT_BUFFER_SIZE, "\r\n");
+}
+
+BOOL is_header_value(const char* name, const char* value, CONNECTION_CONTEXT* cnn)
+{
+	for (const auto& hdr : cnn->request.headers)
+	{
+		if (span_equals_string(hdr.header_name, name) &&
+			span_equals_string(hdr.header_value, value))
+		{
+			return TRUE;
+		}
+	}
 	return FALSE;
 }
 
@@ -184,7 +172,7 @@ void handler_init_socket(CONNECTION_CONTEXT* connection, SERVER_CONTEXT* server)
 	if (connection->acceptSocket != INVALID_SOCKET)
 	{
 		memset(&connection->overlapped, 0, sizeof(OVERLAPPED));
-		memset(&connection->cbuffer, 0, CONTEXT_INPUT_BUFFER_SIZE);
+		memset(&connection->input_buffer, 0, CONTEXT_INPUT_BUFFER_SIZE);
 		DWORD nbr = 0;
 
 		// pointer to connection context is the key
@@ -198,7 +186,7 @@ void handler_init_socket(CONNECTION_CONTEXT* connection, SERVER_CONTEXT* server)
 		else
 		{
 			// acceptex
-			if (FALSE == server->lpfnAcceptEx(server->listenSocket, connection->acceptSocket, connection->cbuffer,
+			if (FALSE == server->lpfnAcceptEx(server->listenSocket, connection->acceptSocket, connection->input_buffer,
 				CONTEXT_INPUT_BUFFER_SIZE - ((sizeof(sockaddr_in) + 16) * 2),
 				sizeof(sockaddr_in) + 16, sizeof(sockaddr_in) + 16,
 				&nbr, reinterpret_cast<LPOVERLAPPED>(connection)))
@@ -227,9 +215,9 @@ void handler_init_socket(CONNECTION_CONTEXT* connection, SERVER_CONTEXT* server)
 
 void post_recv(CONNECTION_CONTEXT* connection, SERVER_CONTEXT* server)
 {
-	connection->wsabuf.buf = connection->cbuffer;
+	connection->wsabuf.buf = connection->input_buffer;
 	connection->wsabuf.len = CONTEXT_INPUT_BUFFER_SIZE;
-	memset(connection->cbuffer, 0, CONTEXT_INPUT_BUFFER_SIZE);
+	memset(connection->input_buffer, 0, CONTEXT_INPUT_BUFFER_SIZE);
 	connection->state = CONTEXT_STATE_PENDING_RECV;
 	DWORD nbr = 0;
 	DWORD flags = 0;
@@ -260,37 +248,55 @@ void on_pending_xmit_file(DWORD nbxfer, CONNECTION_CONTEXT* connection, SERVER_C
 	connection->hFile = INVALID_HANDLE_VALUE;
 
 	// ok, instead, put the socket back into recv mode
-	// TODO should probably only do this if keep alive is specified
+	// should probably only do this if keep alive is specified
 	// otherwise, return to acceptex state
 
 	// Connection: keep-alive
 	//std::span<char> hdr_value;
 	//get_header_value("Connection", hdr_value, connection);
 
-	post_recv(connection, server);
+	//'Connection = 'keep-alive'
+	if (is_header_value("Connection", "keep-alive", connection))
+	{
+		// TODO need to send Connection: keep-alive in response
+		BOOST_LOG_TRIVIAL(info) << "client requested keep alive; posting recv";
+		post_recv(connection, server);
+	}
+	else
+	{
+		BOOST_LOG_TRIVIAL(info) << "closing connection";
+		closesocket(connection->acceptSocket);
+		connection->acceptSocket = INVALID_SOCKET;
+		handler_init_socket(connection, server);
+	}
+
 }
 
 void send_response_error(CONNECTION_CONTEXT* connection, SERVER_CONTEXT* server, int responseCode)
 {
-	memset(connection->head_cbuffer, 0, CONTEXT_OUTPUT_BUFFER_SIZE);
 	switch (responseCode)
 	{
 	case 400:
 		BOOST_LOG_TRIVIAL(info) << "returning 400";
-		connection->tfb.HeadLength = sprintf_s(connection->head_cbuffer, CONTEXT_OUTPUT_BUFFER_SIZE, FORMAT_HTTP_RESPONSE_400);
+		start_response(connection, "400", "Bad Request");
 		break;
 	case 403:
 		BOOST_LOG_TRIVIAL(info) << "returning 403";
-		connection->tfb.HeadLength = sprintf_s(connection->head_cbuffer, CONTEXT_OUTPUT_BUFFER_SIZE, FORMAT_HTTP_RESPONSE_403);
+		start_response(connection, "403", "Forbidden");
 		break;
 	case 404:
 		BOOST_LOG_TRIVIAL(info) << "returning 404";
-		connection->tfb.HeadLength = sprintf_s(connection->head_cbuffer, CONTEXT_OUTPUT_BUFFER_SIZE, FORMAT_HTTP_RESPONSE_404);
+		start_response(connection, "404", "Not Found");
 		break;
 	default:
 		return;
 	}
-	connection->tfb.Head = connection->head_cbuffer;
+	add_header_server(connection, "YORE");
+	complete_response(connection);
+
+	connection->tfb.HeadLength = (DWORD)strlen(connection->output_buffer);
+	connection->tfb.Head = connection->output_buffer;
+
 	if (FALSE == TransmitFile(connection->acceptSocket, NULL, 0, 0 /* default */,
 		&connection->overlapped, &connection->tfb, TF_DISCONNECT))
 	{
@@ -326,8 +332,8 @@ void on_parse_received_data(DWORD nbxfer, CONNECTION_CONTEXT* connection, SERVER
 
 	// parse it
 	parse_is_valid = false;
-	parse_http(connection->cbuffer,
-		connection->cbuffer + (nbxfer < CONTEXT_INPUT_BUFFER_SIZE ? nbxfer : CONTEXT_INPUT_BUFFER_SIZE),
+	parse_http(connection->input_buffer,
+		connection->input_buffer + (nbxfer < CONTEXT_INPUT_BUFFER_SIZE ? nbxfer : CONTEXT_INPUT_BUFFER_SIZE),
 		connection->request);
 	if (connection->request.hasError)
 	{
@@ -422,9 +428,16 @@ void on_parse_received_data(DWORD nbxfer, CONNECTION_CONTEXT* connection, SERVER
 			{
 				BOOST_LOG_TRIVIAL(info) << "Transmitting file: " << connection->path_of_file_to_return;
 				DWORD fileSize = GetFileSize(connection->hFile, nullptr);
-				memset(connection->head_cbuffer, 0, CONTEXT_OUTPUT_BUFFER_SIZE);
-				connection->tfb.HeadLength = sprintf_s(connection->head_cbuffer, CONTEXT_OUTPUT_BUFFER_SIZE, FORMAT_HTTP_RESPONSE_200, fileSize);
-				connection->tfb.Head = connection->head_cbuffer;
+
+				// start request here
+				start_response(connection, "200", "OK");
+				add_header_server(connection, "YORE");
+				add_header_content_length(connection, fileSize);
+				add_header_content_type(connection, "text/html");
+				complete_response(connection);
+				connection->tfb.HeadLength = (DWORD)strlen(connection->output_buffer);
+				connection->tfb.Head = connection->output_buffer;
+
 				if (FALSE == TransmitFile(connection->acceptSocket, connection->hFile, fileSize, 0 /* default */,
 					&connection->overlapped, &connection->tfb, TF_DISCONNECT))
 				{
