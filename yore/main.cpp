@@ -22,6 +22,9 @@
 
 using namespace std;
 
+const char* HEADER_NAME_CONNECTION = "Connection";
+const char* HEADER_VALUE_KEEP_ALIVE = "keep-alive";
+
 namespace std {
 	inline boost::log::formatting_ostream& operator<<(boost::log::formatting_ostream& os, std::span<char>& dt)
 	{
@@ -88,6 +91,14 @@ void start_response(CONNECTION_CONTEXT* connection, const char* response_code, c
 	strcat_s(connection->output_buffer, CONTEXT_OUTPUT_BUFFER_SIZE, response_code);
 	strcat_s(connection->output_buffer, CONTEXT_OUTPUT_BUFFER_SIZE, " ");
 	strcat_s(connection->output_buffer, CONTEXT_OUTPUT_BUFFER_SIZE, response_descr);
+	strcat_s(connection->output_buffer, CONTEXT_OUTPUT_BUFFER_SIZE, "\r\n");
+}
+
+void add_header_custom(CONNECTION_CONTEXT* connection, const char* header_name, const char* header_value)
+{
+	strcat_s(connection->output_buffer, CONTEXT_OUTPUT_BUFFER_SIZE, header_name);
+	strcat_s(connection->output_buffer, CONTEXT_OUTPUT_BUFFER_SIZE, ": ");
+	strcat_s(connection->output_buffer, CONTEXT_OUTPUT_BUFFER_SIZE, header_value);
 	strcat_s(connection->output_buffer, CONTEXT_OUTPUT_BUFFER_SIZE, "\r\n");
 }
 
@@ -256,7 +267,7 @@ void on_pending_xmit_file(DWORD nbxfer, CONNECTION_CONTEXT* connection, SERVER_C
 	//get_header_value("Connection", hdr_value, connection);
 
 	//'Connection = 'keep-alive'
-	if (is_header_value("Connection", "keep-alive", connection))
+	if (connection->keep_alive)
 	{
 		// TODO need to send Connection: keep-alive in response
 		BOOST_LOG_TRIVIAL(info) << "client requested keep alive; posting recv";
@@ -292,6 +303,10 @@ void send_response_error(CONNECTION_CONTEXT* connection, SERVER_CONTEXT* server,
 		return;
 	}
 	add_header_server(connection, "YORE");
+	if (connection->keep_alive)
+	{
+		add_header_custom(connection, HEADER_NAME_CONNECTION, HEADER_VALUE_KEEP_ALIVE);
+	}
 	complete_response(connection);
 
 	connection->tfb.HeadLength = (DWORD)strlen(connection->output_buffer);
@@ -352,6 +367,7 @@ void on_parse_received_data(DWORD nbxfer, CONNECTION_CONTEXT* connection, SERVER
 			BOOST_LOG_TRIVIAL(info) << h;
 		}
 		parse_is_valid = true;
+		connection->keep_alive = is_header_value(HEADER_NAME_CONNECTION, HEADER_VALUE_KEEP_ALIVE, connection);
 	}
 
 	if (TRUE == parse_is_valid)
